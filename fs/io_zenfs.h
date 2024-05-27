@@ -235,6 +235,13 @@ class ZonedWritableFile : public FSWritableFile {
   virtual Env::WriteLifeTimeHint GetWriteLifeTimeHint() override {
     return zoneFile_->GetWriteLifeTimeHint();
   }
+  uint64_t GetFileSize(const IOOptions& /*options*/,
+                       IODebugContext* /*dbg*/) override {
+    if (zoneFile_ != nullptr) {
+      return zoneFile_->GetFileSize();
+    }
+    return 0;
+  }
 
  private:
   IOStatus BufferedWrite(const Slice& data);
