@@ -4,7 +4,11 @@ flexfs_SOURCES-y = \
 	fs/zbd_zenfs.cc \
 	fs/io_zenfs.cc \
 	fs/zonefs_zenfs.cc \
-	fs/zbdlib_zenfs.cc
+	fs/zbdlib_zenfs.cc \
+	fs/uringlib_zenfs.cc \
+	fs/uring_cmd.cc \
+	fs/fdpnvme.cc \
+	fs/util.cc
 
 flexfs_HEADERS-y = \
 	fs/fs_zenfs.h \
@@ -15,7 +19,11 @@ flexfs_HEADERS-y = \
 	fs/snapshot.h \
 	fs/filesystem_utility.h \
 	fs/zonefs_zenfs.h \
-	fs/zbdlib_zenfs.h
+	fs/zbdlib_zenfs.h \
+	fs/uringlib_zenfs.h \
+	fs/uring_cmd.h \
+	fs/fdpnvme.h \
+	fs/util.h
 
 flexfs_PKGCONFIG_REQUIRES-y += "libzbd >= 1.5.0"
 flexfs_PKGCONFIG_REQUIRES-y += "liburing >= 1.5.0"
