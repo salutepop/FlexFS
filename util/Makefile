@@ -1,6 +1,6 @@
-# ZenFS utility makefile
+# FlexFS utility makefile
 
-TARGET = zenfs
+TARGET = flexfs
 
 CC ?= gcc
 CXX ?= g++
@@ -28,7 +28,7 @@ $(TARGET).dbg: $(TARGET)
 debug: $(TARGET)
 
 $(TARGET): $(TARGET).cc
-	$(CXX) $(CXXFLAGS) -g -o $(TARGET) $< $(LIBS) $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -g -O0 -o $(TARGET) $< $(LIBS) $(LDFLAGS)
 
 clean:
 	$(RM) $(TARGET) $(TARGET).dbg

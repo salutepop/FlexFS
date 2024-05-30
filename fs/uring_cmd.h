@@ -17,7 +17,7 @@ enum nvme_io_opcode {
   nvme_cmd_io_mgmt_send = 0x1d,
 };
 
-class Uring_cmd {
+class UringCmd {
 private:
   uint32_t qd_;
   uint32_t blocksize_;
@@ -38,9 +38,9 @@ private:
   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
 
 public:
-  Uring_cmd(){};
-  Uring_cmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
-            io_uring_params params);
+  UringCmd(){};
+  UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
+           io_uring_params params);
   // size = byte
   void prepUringRead(int fd, off_t offset, size_t size, void *buf) {
     prepUring(fd, op_read, offset, size, buf);
@@ -59,27 +59,10 @@ public:
   int submitCommand(int nr_reqs = 0);
   int waitCompleted();
 
-  int uringRead(int fd, off_t offset, size_t size, void *buf) {
-    prepUring(fd, op_read, offset, size, buf);
-    submitCommand();
-    return waitCompleted();
-  }
-  int uringWrite(int fd, off_t offset, size_t size, void *buf) {
-    prepUring(fd, op_write, offset, size, buf);
-    submitCommand();
-    return waitCompleted();
-  }
-  int uringCmdRead(int fd, int ns, off_t offset, size_t size, void *buf) {
-    prepUringCmd(fd, ns, op_read, offset, size, buf);
-    submitCommand();
-    return waitCompleted();
-  }
+  int uringRead(int fd, off_t offset, size_t size, void *buf);
+  int uringWrite(int fd, off_t offset, size_t size, void *buf);
+  int uringCmdRead(int fd, int ns, off_t offset, size_t size, void *buf);
   int uringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
-                    uint32_t dspec) {
-    const uint32_t kPlacementMode = 2;
-    prepUringCmd(fd, ns, op_write, offset, size, buf, kPlacementMode, dspec);
-    submitCommand();
-    return waitCompleted();
-  }
+                    uint32_t dspec);
   int isCqOverflow();
 };

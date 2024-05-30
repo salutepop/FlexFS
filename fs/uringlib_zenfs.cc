@@ -27,7 +27,12 @@ UringlibBackend::UringlibBackend(std::string bdevname)
     : filename_("/dev/" + bdevname),
       read_f_(-1),
       read_direct_f_(-1),
-      write_f_(-1) {}
+      write_f_(-1),
+      fdp_(filename_) {
+  uint32_t qd = 32;
+  NvmeData nvme = fdp_.getNvmeData();
+  uringCmd_ = {qd, nvme.blockSize(), nvme.lbaShift(), io_uring_params{}};
+}
 
 std::string UringlibBackend::ErrorToString(int err) {
   char *err_str = strerror(err);
@@ -35,40 +40,24 @@ std::string UringlibBackend::ErrorToString(int err) {
   return "";
 }
 
-IOStatus UringlibBackend::CheckScheduler() {
-  std::ostringstream path;
-  std::string s = filename_;
-  std::fstream f;
-
-  s.erase(0, 5);  // Remove "/dev/" from /dev/nvmeXnY
-  path << "/sys/block/" << s << "/queue/scheduler";
-  f.open(path.str(), std::fstream::in);
-  if (!f.is_open()) {
-    return IOStatus::InvalidArgument("Failed to open " + path.str());
-  }
-
-  std::string buf;
-  getline(f, buf);
-  if (buf.find("[mq-deadline]") == std::string::npos) {
-    f.close();
-    return IOStatus::InvalidArgument(
-        "Current ZBD scheduler is not mq-deadline, set it to mq-deadline.");
-  }
-
-  f.close();
-  return IOStatus::OK();
-}
+IOStatus UringlibBackend::CheckScheduler() { return IOStatus::OK(); }
 
 IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
                                unsigned int *max_active_zones,
                                unsigned int *max_open_zones) {
-  zbd_info info;
-
   /* The non-direct file descriptor acts as an exclusive-use semaphore */
   if (exclusive) {
-    read_f_ = zbd_open(filename_.c_str(), O_RDONLY | O_EXCL, &info);
+    read_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY | O_EXCL);
+    // INFO: uringCmdRead -> pread (block align..)
+    // read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY |
+    // O_EXCL);
   } else {
-    read_f_ = zbd_open(filename_.c_str(), O_RDONLY, &info);
+    read_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY);
+    // INFO: uringCmdRead -> pread (block align..)
+    // read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY |
+    // O_EXCL);
+    //  WARN: 임시로 o_direct 실험
+    //   read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY);
   }
 
   if (read_f_ < 0) {
@@ -76,7 +65,11 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
         "Failed to open zoned block device for read: " + ErrorToString(errno));
   }
 
-  read_direct_f_ = zbd_open(filename_.c_str(), O_RDONLY | O_DIRECT, &info);
+  // read_direct_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY |
+  // O_DIRECT);
+  read_direct_f_ = read_f_;  // O_DIRECT flag support is not present with
+                             // nvme-ns charatcer devices
+
   if (read_direct_f_ < 0) {
     return IOStatus::InvalidArgument(
         "Failed to open zoned block device for direct read: " +
@@ -86,7 +79,7 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   if (readonly) {
     write_f_ = -1;
   } else {
-    write_f_ = zbd_open(filename_.c_str(), O_WRONLY | O_DIRECT, &info);
+    write_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_WRONLY);
     if (write_f_ < 0) {
       return IOStatus::InvalidArgument(
           "Failed to open zoned block device for write: " +
@@ -94,39 +87,79 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
     }
   }
 
-  if (info.model != ZBD_DM_HOST_MANAGED) {
-    return IOStatus::NotSupported("Not a host managed block device");
-  }
-
+  // TODO: Don't use
   IOStatus ios = CheckScheduler();
   if (ios != IOStatus::OK()) return ios;
 
-  block_sz_ = info.pblock_size;
-  zone_sz_ = info.zone_size;
-  nr_zones_ = info.nr_zones;
-  *max_active_zones = info.max_nr_active_zones;
-  *max_open_zones = info.max_nr_open_zones;
+  NvmeData nvmeData = fdp_.getNvmeData();
+
+  // TODO: NUSE:hard-coding(RU_SIZE), 스펙 문서 163페이지 참고
+  block_sz_ = nvmeData.blockSize();
+  // zone_sz_ = RU_SIZE / block_sz_;
+  zone_sz_ = RU_SIZE;
+  nr_zones_ = nvmeData.nuse() / (zone_sz_ / block_sz_);
+  *max_active_zones = fdp_.getMaxPid() + 1;
+  *max_open_zones = fdp_.getMaxPid() + 1;
+
+  std::stringstream info;
+  info << "Open Backend" << "\n ";
+  info << "read_f : " << read_f_ << "\n ";
+  info << "write_f : " << write_f_ << "\n ";
+  info << "block_sz : " << block_sz_ << "\n ";
+  info << "zone_sz : " << zone_sz_ << "\n ";
+  info << "nr_zones : " << nr_zones_ << "\n ";
+  info << "max_active_zones : " << *max_active_zones << "\n ";
+  info << "max_open_zones : " << *max_open_zones << "\n ";
+  info << "max pid : " << fdp_.getMaxPid() << "\n ";
+  info << "nvmeData nuse : " << nvmeData.nuse() << "\n ";
+  info << "RU SIZE : " << RU_SIZE << " ";
+  LOG("[DBG]", info.str());
+
   return IOStatus::OK();
 }
 
 std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
-  int ret;
-  void *zones;
-  unsigned int nr_zones;
+  struct zbd_zone *zones;
+  struct zbd_zone zone;
+  // unsigned int shift = ilog2(block_sz_);
 
-  ret = zbd_list_zones(read_f_, 0, zone_sz_ * nr_zones_, ZBD_RO_ALL,
-                       (struct zbd_zone **)&zones, &nr_zones);
-  if (ret) {
+  /* Allocate zone array */
+  zones = (struct zbd_zone *)calloc(nr_zones_, sizeof(struct zbd_zone));
+  if (!zones) {
     return nullptr;
   }
 
-  std::unique_ptr<ZoneList> zl(new ZoneList(zones, nr_zones));
+  for (int n = 0; n < (int)nr_zones_; n++) {
+    // zone.start = (n * zone_sz_) << shift;
+    // zone.len = zone_sz_ << shift;
+    //  zone.capacity = zone_sz_ << shift;
+    zone.start = (n * zone_sz_);
+    zone.len = zone_sz_;
+    zone.capacity = zone_sz_;
+    if (n == 0) {
+      // superblock * 2
+      zone.wp = block_sz_ * 2;
+    } else {
+      zone.wp = zone.start;
+    }
+
+    zone.type = ZBD_ZONE_TYPE_SWR;
+    zone.cond = ZBD_ZONE_COND_EMPTY;
+    zone.flags = 0;
+    zone.flags |= ZBD_ZONE_RWP_RECOMMENDED;
+    zone.flags |= ZBD_ZONE_NON_SEQ_RESOURCES;
+
+    memcpy(&zones[n], &zone, sizeof(zone));
+  }
+
+  std::unique_ptr<ZoneList> zl(new ZoneList(zones, nr_zones_));
 
   return zl;
 }
 
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
+  /*
   unsigned int report = 1;
   struct zbd_zone z;
   int ret;
@@ -138,6 +171,7 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
 
   if (ret || (report != 1)) return IOStatus::IOError("Zone report failed\n");
 
+  // TODO: 언제 offline이 되는거지? full?
   if (zbd_zone_offline(&z)) {
     *offline = true;
     *max_capacity = 0;
@@ -145,38 +179,64 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
     *offline = false;
     *max_capacity = zbd_zone_capacity(&z);
   }
+  */
+  unsigned int shift = ilog2(block_sz_);
+  *offline = false;
+  *max_capacity = zone_sz_ << shift;
 
+  DummyFunc(start);
   return IOStatus::OK();
 }
 
 IOStatus UringlibBackend::Finish(uint64_t start) {
-  int ret;
+  // int ret;
 
-  ret = zbd_finish_zones(write_f_, start, zone_sz_);
-  if (ret) return IOStatus::IOError("Zone finish failed\n");
+  // ret = zbd_finish_zones(write_f_, start, zone_sz_);
+  // if (ret) return IOStatus::IOError("Zone finish failed\n");
 
+  DummyFunc(start);
   return IOStatus::OK();
 }
 
 IOStatus UringlibBackend::Close(uint64_t start) {
-  int ret;
+  // int ret;
 
-  ret = zbd_close_zones(write_f_, start, zone_sz_);
-  if (ret) return IOStatus::IOError("Zone close failed\n");
+  // ret = zbd_close_zones(write_f_, start, zone_sz_);
+  // if (ret) return IOStatus::IOError("Zone close failed\n");
 
+  DummyFunc(start);
   return IOStatus::OK();
 }
 
 int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
-  return posix_fadvise(read_f_, pos, size, POSIX_FADV_DONTNEED);
+  DummyFunc(pos);
+  DummyFunc(size);
+  return 0;
 }
 
 int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
-  return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
+  std::cout << "Backend read" << "pos : " << pos << ", " << "size : " << size
+            << std::endl;
+  // return uringCmd_.uringRead(direct ? read_direct_f_ : read_f_, pos, size,
+  // buf);
+  //  return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
+  //   TODO: block align 문제로 인해, 기존 bdev pread로 사용 (fd도 bdev)
+  //   return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
+  //   LOG("POS", pos);
+  //   LOG("SIZE", size);
+  return uringCmd_.uringCmdRead(direct ? read_direct_f_ : read_f_,
+                                fdp_.getNvmeData().nsId(), pos, size, buf);
 }
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
-  return pwrite(write_f_, data, size, pos);
+  std::cout << "Backend write" << "pos : " << pos << ", " << "size : " << size
+            << std::endl;
+  // TODO: uring_cmd 로 바꾸기
+  // return pwrite(write_f_, data, size, pos);
+  // TODO: dspec == pid
+  uint32_t dspec = 0;
+  return uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
+                                 data, dspec);
 }
 
 }  // namespace ROCKSDB_NAMESPACE

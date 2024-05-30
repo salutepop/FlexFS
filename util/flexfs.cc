@@ -22,8 +22,8 @@
 #include <fs/fs_zenfs.h>
 #include <fs/version.h>
 #else
-#include <rocksdb/plugin/zenfs/fs/fs_zenfs.h>
-#include <rocksdb/plugin/zenfs/fs/version.h>
+#include <rocksdb/plugin/flexfs/fs/fs_zenfs.h>
+#include <rocksdb/plugin/flexfs/fs/version.h>
 #endif
 
 using GFLAGS_NAMESPACE::ParseCommandLineFlags;
@@ -31,6 +31,7 @@ using GFLAGS_NAMESPACE::RegisterFlagValidator;
 using GFLAGS_NAMESPACE::SetUsageMessage;
 
 DEFINE_string(zbd, "", "Path to a zoned block device.");
+DEFINE_string(fdp_bd, "", "Path to a fpd nvme block device.");
 DEFINE_string(zonefs, "", "Path to a zonefs mountpoint.");
 DEFINE_string(aux_path, "",
               "Path for auxiliary file storage (log and lock files).");
@@ -57,8 +58,11 @@ void AddDirSeparatorAtEnd(std::string &path) {
 
 std::unique_ptr<ZonedBlockDevice> zbd_open(bool readonly, bool exclusive) {
   std::unique_ptr<ZonedBlockDevice> zbd{new ZonedBlockDevice(
-      FLAGS_zbd.empty() ? FLAGS_zonefs : FLAGS_zbd,
-      FLAGS_zbd.empty() ? ZbdBackendType::kZoneFS : ZbdBackendType::kBlockDev,
+      FLAGS_zbd.empty() ? FLAGS_fdp_bd.empty() ? FLAGS_zonefs : FLAGS_fdp_bd
+                        : FLAGS_zbd,
+      FLAGS_zbd.empty() ? FLAGS_fdp_bd.empty() ? ZbdBackendType::kZoneFS
+                                               : ZbdBackendType::kFdpDev
+                        : ZbdBackendType::kBlockDev,
       nullptr)};
 
   IOStatus open_status = zbd->Open(readonly, exclusive);
@@ -774,6 +778,28 @@ int zenfs_tool_fsinfo() {
   return 0;
 }
 
+int zenfs_tool_test() {
+  Status s;
+  std::unique_ptr<ZonedBlockDevice> zbd = zbd_open(true, false);
+  if (!zbd) {
+    fprintf(stderr, "Failed to open device\n");
+    return 1;
+  }
+
+  /*
+  std::unique_ptr<ZenFS> zenFS;
+  s = zenfs_mount(zbd, &zenFS, true);
+  if (!s.ok()) {
+    fprintf(stderr, "Failed to mount filesystem, error: %s\n",
+            s.ToString().c_str());
+    return 1;
+  }
+  std::string superblock_report;
+  zenFS->ReportSuperblock(&superblock_report);
+  fprintf(stdout, "%s\n", superblock_report.c_str());
+  */
+  return 0;
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char **argv) {
@@ -793,13 +819,14 @@ int main(int argc, char **argv) {
   std::string subcmd(argv[1]);
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  if (FLAGS_zonefs.empty() && FLAGS_zbd.empty() && subcmd != "ls-uuid") {
+  if (FLAGS_fdp_bd.empty() && FLAGS_zonefs.empty() && FLAGS_zbd.empty() &&
+      subcmd != "ls-uuid") {
     fprintf(
         stderr,
         "You need to specify a zoned block device using --zbd or --zonefs\n");
     return 1;
   }
-  if (!FLAGS_zonefs.empty() && !FLAGS_zbd.empty()) {
+  if (!FLAGS_fdp_bd.empty() && !FLAGS_zonefs.empty() && !FLAGS_zbd.empty()) {
     fprintf(stderr,
             "You need to specify a zoned block device using either "
             "--zbd or --zonefs - not both\n");
@@ -807,6 +834,8 @@ int main(int argc, char **argv) {
   }
   if (subcmd == "mkfs") {
     return ROCKSDB_NAMESPACE::zenfs_tool_mkfs();
+  } else if (subcmd == "test") {
+    return ROCKSDB_NAMESPACE::zenfs_tool_test();
   } else if (subcmd == "list") {
     return ROCKSDB_NAMESPACE::zenfs_tool_list();
   } else if (subcmd == "ls-uuid") {

@@ -30,6 +30,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
 #include "snapshot.h"
+#include "uringlib_zenfs.h"
 #include "zbdlib_zenfs.h"
 #include "zonefs_zenfs.h"
 
@@ -180,6 +181,9 @@ ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
   } else if (backend == ZbdBackendType::kZoneFS) {
     zbd_be_ = std::unique_ptr<ZoneFsBackend>(new ZoneFsBackend(path));
     Info(logger_, "New zonefs backing: %s", zbd_be_->GetFilename().c_str());
+  } else if (backend == ZbdBackendType::kFdpDev) {
+    zbd_be_ = std::unique_ptr<UringlibBackend>(new UringlibBackend(path));
+    Info(logger_, "New Zoned Block Device: %s", zbd_be_->GetFilename().c_str());
   }
 }
 
@@ -199,6 +203,8 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
   IOStatus ios = zbd_be_->Open(readonly, exclusive, &max_nr_active_zones,
                                &max_nr_open_zones);
   if (ios != IOStatus::OK()) return ios;
+
+  LOG("NrZones", zbd_be_->GetNrZones());
 
   if (zbd_be_->GetNrZones() < ZENFS_MIN_ZONES) {
     return IOStatus::NotSupported("To few zones on zoned backend (" +

@@ -37,7 +37,7 @@ flexfs_PKGCONFIG_REQUIRES-$(flexfs_EXPORT_PROMETHEUS) += ", prometheus-cpp-pull 
 flexfs_SOURCES += $(flexfs_SOURCES-y)
 flexfs_HEADERS += $(flexfs_HEADERS-y)
 flexfs_CXXFLAGS += $(flexfs_CXXFLAGS-y)
-flexfs_LDFLAGS += -u flexfs_filesystem_reg
+flexfs_LDFLAGS += -u zenfs_filesystem_reg
 
 flexfs_ROOT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 

@@ -24,6 +24,8 @@
 #ifdef ZENFS_EXPORT_PROMETHEUS
 #include "metrics_prometheus.h"
 #endif
+#include <iostream>
+
 #include "rocksdb/utilities/object_registry.h"
 #include "snapshot.h"
 #include "util/coding.h"
@@ -143,6 +145,10 @@ IOStatus ZenMetaLog::AddRecord(const Slice& slice) {
 
   phys_sz = record_sz + zMetaHeaderSize;
 
+  // TODO: zbdlib과 uringlib에 따라 crc 붙는게 달라지는지 확인하기
+  // phys_sz 도 뭔가 다른 것 같음
+  // 특히 uringlib인데도 size가 512인 것 같음 (재확인)
+  // gdb로 AddRecord break 잡고, 동일하게 비교하기
   if (phys_sz % bs_) phys_sz += bs_ - phys_sz % bs_;
 
   assert(data != nullptr);
@@ -173,6 +179,9 @@ IOStatus ZenMetaLog::Read(Slice* slice) {
   size_t to_read = slice->size();
   int ret;
 
+  std::cout << "read_pos_ : " << read_pos_ << ", "
+            << "zone_->wp_ : " << zone_->wp_ << ", " << "to_read : " << to_read
+            << ", " << "zone_->start_ : " << zone_->start_ << ", " << std::endl;
   if (read_pos_ >= zone_->wp_) {
     // EOF
     slice->clear();
@@ -185,6 +194,9 @@ IOStatus ZenMetaLog::Read(Slice* slice) {
 
   while (read < to_read) {
     ret = zbd_->Read(data + read, read_pos_, to_read - read, false);
+
+    std::cout << "Read ret : " << ret << ", " << "data : " << data << ", "
+              << std::endl;
 
     if (ret == -1 && errno == EINTR) continue;
     if (ret < 0) return IOStatus::IOError("Read failed");
@@ -1612,6 +1624,7 @@ Status NewZenFS(FileSystem** fs, const ZbdBackendType backend_type,
 
   ZonedBlockDevice* zbd =
       new ZonedBlockDevice(backend_name, backend_type, logger, metrics);
+  // TODO: zbd 및 zbd_be open 에uringlib backend 추가
   IOStatus zbd_status = zbd->Open(false, true);
   if (!zbd_status.ok()) {
     Error(logger, "mkfs: Failed to open zoned block device: %s",

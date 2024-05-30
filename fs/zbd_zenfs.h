@@ -137,6 +137,7 @@ class ZonedBlockDeviceBackend {
 enum class ZbdBackendType {
   kBlockDev,
   kZoneFS,
+  kFdpDev,
 };
 
 class ZonedBlockDevice {

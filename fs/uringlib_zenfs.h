@@ -12,7 +12,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "fdpnvme.h"
 #include "rocksdb/io_status.h"
+#include "uring_cmd.h"
 #include "zbd_zenfs.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -23,6 +25,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   int read_f_;
   int read_direct_f_;
   int write_f_;
+  FdpNvme fdp_;
+  UringCmd uringCmd_;
 
  public:
   explicit UringlibBackend(std::string bdevname);
@@ -87,6 +91,7 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
  private:
   IOStatus CheckScheduler();
   std::string ErrorToString(int err);
+  uint64_t DummyFunc(uint64_t value) { return value; }
 };
 
 }  // namespace ROCKSDB_NAMESPACE

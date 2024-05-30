@@ -1,16 +1,21 @@
 #include "uring_cmd.h"
+
 #include <liburing.h>
 
-Uring_cmd::Uring_cmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
-                     io_uring_params params)
-    : qd_(qd), blocksize_(blocksize), lbashift_(lbashift), req_limitmax_(qd),
-      req_limitlow_(qd >> 1), req_inflight_(0) {
+UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
+                   io_uring_params params)
+    : qd_(qd),
+      blocksize_(blocksize),
+      lbashift_(lbashift),
+      req_limitmax_(qd),
+      req_limitlow_(qd >> 1),
+      req_inflight_(0) {
   initBuffer();
   initUring(params);
 }
 
 /* unused, 나중에 fixed buffer 적용 시 사용 예정 */
-void Uring_cmd::initBuffer() {
+void UringCmd::initBuffer() {
   int err;
   void *buf;
 
@@ -28,7 +33,7 @@ void Uring_cmd::initBuffer() {
   }
 }
 
-void Uring_cmd::initUring(io_uring_params &params) {
+void UringCmd::initUring(io_uring_params &params) {
   // 모든 멤버가 0으로 초기화된 io_uring_params 구조체를 생성
   io_uring_params empty_params;
   memset(&empty_params, 0, sizeof(empty_params));
@@ -41,7 +46,7 @@ void Uring_cmd::initUring(io_uring_params &params) {
     p.flags |= IORING_SETUP_CQE32;
 
     p.flags |= IORING_SETUP_CQSIZE;
-    p.cq_entries = qd_ * 2; // cq size = sq size * 2, to dealwith cq overflow
+    p.cq_entries = qd_ * 2;  // cq size = sq size * 2, to dealwith cq overflow
 
     p.flags |= IORING_SETUP_COOP_TASKRUN;
     // p.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
@@ -55,15 +60,14 @@ void Uring_cmd::initUring(io_uring_params &params) {
   io_uring_queue_init_params(qd_, &ring_, &params_);
 }
 
-void Uring_cmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
-                             size_t size, void *buf, uint32_t dtype,
-                             uint32_t dspec) {
+void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
+                            size_t size, void *buf, uint32_t dtype,
+                            uint32_t dspec) {
   struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
   struct nvme_uring_cmd *cmd;
   // struct iovec iovec;
   // iovec.iov_base = buf;
   // iovec.iov_len = size;
-
   memset(sqe, 0, sizeof(*sqe));
   sqe->fd = fd;
   sqe->cmd_op = NVME_URING_CMD_IO;
@@ -77,10 +81,14 @@ void Uring_cmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
   __u64 slba;
   __u32 nlb;
   slba = offset >> lbashift_;
+  // if (size < blocksize_) {
+  //   size = blocksize_;
+  // }
   if (size < blocksize_) {
-    size = blocksize_;
+    nlb = 0;
+  } else {
+    nlb = (size >> lbashift_) - 1;
   }
-  nlb = (size >> lbashift_) - 1;
 
   // std::cout << "slba, nlba, lba_shift : " << slba << ", " << nlb << ", "
   //           << lbashift_ << std::endl;
@@ -102,8 +110,8 @@ void Uring_cmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
   DBG("DATA", std::string((char *)buf, size));
 }
 
-void Uring_cmd::prepUring(int fd, bool is_read, off_t offset, size_t size,
-                          void *buf) {
+void UringCmd::prepUring(int fd, bool is_read, off_t offset, size_t size,
+                         void *buf) {
   struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
   struct iovec iov;
   iov.iov_base = buf;
@@ -116,13 +124,13 @@ void Uring_cmd::prepUring(int fd, bool is_read, off_t offset, size_t size,
   }
 }
 
-int Uring_cmd::submitCommand(int nr_reqs) {
+int UringCmd::submitCommand(int nr_reqs) {
   int err;
 
   /*
   if (((*ring_.sq.kflags) & IORING_SQ_CQ_OVERFLOW)) {
-    LOG("uring_submit", err);
-    LOG("flag", ring_.sq.kflags);
+    DBG("uring_submit", err);
+    DBG("flag", ring_.sq.kflags);
     WaitCompleted();
   }
   */
@@ -135,20 +143,68 @@ int Uring_cmd::submitCommand(int nr_reqs) {
   return err;
 }
 
-int Uring_cmd::waitCompleted() {
-  struct io_uring_cqe *cqe;
+int UringCmd::waitCompleted() {
+  struct io_uring_cqe *cqe = NULL;
   int err;
 
+  // err = io_uring_wait_cqe_nr(&ring_, &cqe, qd_);
   err = io_uring_wait_cqe(&ring_, &cqe);
   if (err != 0) {
     LOG("uring_wait_cqe", err);
   }
-  io_uring_cqe_seen(&ring_, cqe);
   if (cqe->res < 0) {
     LOG("cqe->res", cqe->res);
   }
-  DBG("[ERR] cq_has_overflow", io_uring_cq_has_overflow(&ring_));
+  // DBG("[ERR] cq_has_overflow", io_uring_cq_has_overflow(&ring_));
+  io_uring_cqe_seen(&ring_, cqe);
   return cqe->res;
 }
 
-int Uring_cmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
+int UringCmd::uringRead(int fd, off_t offset, size_t size, void *buf) {
+  prepUring(fd, op_read, offset, size, buf);
+  submitCommand();
+  return waitCompleted();
+}
+int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
+  prepUring(fd, op_write, offset, size, buf);
+  submitCommand();
+  return waitCompleted();
+}
+int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
+                           void *buf) {
+  int ret;
+  if (size < blocksize_) {
+    void *tempBuf;
+    if (posix_memalign((void **)&tempBuf, PAGE_SIZE, blocksize_)) {
+      LOG("[ERROR]", "MEM Align");
+    }
+    prepUringCmd(fd, ns, op_read, offset, size, tempBuf);
+    submitCommand();
+    ret = waitCompleted();
+    if (ret == 0) {
+      memcpy(buf, (char *)tempBuf + (offset % blocksize_), size);
+      ret = size;
+    }
+    LOG("tempBuf", (char *)tempBuf);
+    LOG("Buf", (char *)buf);
+    free(tempBuf);
+  } else {
+    prepUringCmd(fd, ns, op_read, offset, size, buf);
+    submitCommand();
+    ret = waitCompleted();
+  }
+  return ret;
+}
+int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
+                            void *buf, uint32_t dspec) {
+  const uint32_t kPlacementMode = 2;
+  int ret;
+  prepUringCmd(fd, ns, op_write, offset, size, buf, kPlacementMode, dspec);
+  submitCommand();
+  ret = waitCompleted();
+  if (ret == 0) {
+    ret = size;
+  }
+  return ret;
+}
+int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
