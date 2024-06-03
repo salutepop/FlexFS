@@ -786,7 +786,6 @@ int zenfs_tool_test() {
     return 1;
   }
 
-  /*
   std::unique_ptr<ZenFS> zenFS;
   s = zenfs_mount(zbd, &zenFS, true);
   if (!s.ok()) {
@@ -797,7 +796,6 @@ int zenfs_tool_test() {
   std::string superblock_report;
   zenFS->ReportSuperblock(&superblock_report);
   fprintf(stdout, "%s\n", superblock_report.c_str());
-  */
   return 0;
 }
 }  // namespace ROCKSDB_NAMESPACE

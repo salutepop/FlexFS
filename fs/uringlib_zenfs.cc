@@ -215,25 +215,26 @@ int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
 }
 
 int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
-  std::cout << "Backend read" << "pos : " << pos << ", " << "size : " << size
-            << std::endl;
-  // return uringCmd_.uringRead(direct ? read_direct_f_ : read_f_, pos, size,
-  // buf);
-  //  return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
-  //   TODO: block align 문제로 인해, 기존 bdev pread로 사용 (fd도 bdev)
+  // std::cout << "Backend read" << "pos : " << pos << ", " << "size : " << size
+  //           << std::endl;
+  //  return uringCmd_.uringRead(direct ? read_direct_f_ : read_f_, pos, size,
+  //  buf);
   //   return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
-  //   LOG("POS", pos);
-  //   LOG("SIZE", size);
+  //    TODO: block align 문제로 인해, 기존 bdev pread로 사용 (fd도 bdev)
+  //    return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
+  //    LOG("POS", pos);
+  //    LOG("SIZE", size);
   return uringCmd_.uringCmdRead(direct ? read_direct_f_ : read_f_,
                                 fdp_.getNvmeData().nsId(), pos, size, buf);
 }
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
-  std::cout << "Backend write" << "pos : " << pos << ", " << "size : " << size
-            << std::endl;
-  // TODO: uring_cmd 로 바꾸기
-  // return pwrite(write_f_, data, size, pos);
-  // TODO: dspec == pid
+  // std::cout << "Backend write" << "pos : " << pos << ", " << "size : " <<
+  // size
+  //           << std::endl;
+  //  TODO: uring_cmd 로 바꾸기
+  //  return pwrite(write_f_, data, size, pos);
+  //  TODO: dspec == pid
   uint32_t dspec = 0;
   return uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
                                  data, dspec);

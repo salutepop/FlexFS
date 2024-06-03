@@ -1900,6 +1900,17 @@ FactoryFunc<FileSystem> zenfs_filesystem_reg =
             if (!s.ok()) {
               *errmsg = s.ToString();
             }
+          } else if (devID.rfind("fdp:") == 0) {
+            devID.replace(0, strlen("fdp:"), "");
+#ifdef ZENFS_EXPORT_PROMETHEUS
+            s = NewZenFS(&fs, ZbdBackendType::kFdpDev, devID,
+                         std::make_shared<ZenFSPrometheusMetrics>());
+#else
+            s = NewZenFS(&fs, ZbdBackendType::kFdpDev, devID);
+#endif
+            if (!s.ok()) {
+              *errmsg = s.ToString();
+            }
           } else if (devID.rfind("uuid:") == 0) {
             std::map<std::string, std::pair<std::string, ZbdBackendType>>
                 zenFileSystems;
