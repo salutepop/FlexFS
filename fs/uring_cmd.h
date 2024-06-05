@@ -41,6 +41,19 @@ public:
   UringCmd(){};
   UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
            io_uring_params params);
+  ~UringCmd() {
+    io_uring_queue_exit(&ring_);
+
+    // iovecs_ 메모리 해제
+    if (iovecs_) {
+      for (int i = 0; i < roundup_pow2(qd_); i++) {
+        if (iovecs_[i].iov_base) {
+          free(iovecs_[i].iov_base);
+        }
+      }
+      free(iovecs_);
+    }
+  }
   // size = byte
   void prepUringRead(int fd, off_t offset, size_t size, void *buf) {
     prepUring(fd, op_read, offset, size, buf);

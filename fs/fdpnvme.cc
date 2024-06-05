@@ -186,8 +186,6 @@ NvmeData FdpNvme::readNvmeInfo(const std::string &bdevName) {
     lba_size = 1 << ns.lbaf[(ns.flbas & 0x0f)].ds;
     lba_shift = ilog2(lba_size);
     nuse = ns.nuse;
-    // LOG("LE: nuse", nuse);
-    // LOG("HO: nuse", le64toh(nuse));
 
     close(fd);
   } catch (const std::exception &e) {
@@ -219,8 +217,6 @@ void FdpNvme::openNvmeDevice(const std::string &bdevName) {
     auto cdevName = getNvmeCharDevice(bdevName);
     cfd_ = open(cdevName.c_str(), flags);
     bfd_ = open(bdevName.c_str(), flags);
-    LOG("Char FD", cfd_);
-    LOG("Block FD", bfd_);
   } catch (const std::system_error &) {
     throw;
   }

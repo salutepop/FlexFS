@@ -31,9 +31,9 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
  public:
   explicit UringlibBackend(std::string bdevname);
   ~UringlibBackend() {
-    zbd_close(read_f_);
-    zbd_close(read_direct_f_);
-    zbd_close(write_f_);
+    close(read_f_);
+    close(read_direct_f_);
+    close(write_f_);
   }
 
   IOStatus Open(bool readonly, bool exclusive, unsigned int *max_active_zones,

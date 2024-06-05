@@ -28,11 +28,9 @@ UringlibBackend::UringlibBackend(std::string bdevname)
       read_f_(-1),
       read_direct_f_(-1),
       write_f_(-1),
-      fdp_(filename_) {
-  uint32_t qd = 32;
-  NvmeData nvme = fdp_.getNvmeData();
-  uringCmd_ = {qd, nvme.blockSize(), nvme.lbaShift(), io_uring_params{}};
-}
+      fdp_(filename_),
+      uringCmd_(32, fdp_.getNvmeData().blockSize(),
+                fdp_.getNvmeData().lbaShift(), io_uring_params{}) {}
 
 std::string UringlibBackend::ErrorToString(int err) {
   char *err_str = strerror(err);
@@ -101,6 +99,7 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   *max_active_zones = fdp_.getMaxPid() + 1;
   *max_open_zones = fdp_.getMaxPid() + 1;
 
+  /*
   std::stringstream info;
   info << "Open Backend" << "\n ";
   info << "read_f : " << read_f_ << "\n ";
@@ -114,6 +113,7 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   info << "nvmeData nuse : " << nvmeData.nuse() << "\n ";
   info << "RU SIZE : " << RU_SIZE << " ";
   LOG("[DBG]", info.str());
+  */
 
   return IOStatus::OK();
 }
@@ -215,26 +215,11 @@ int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
 }
 
 int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
-  // std::cout << "Backend read" << "pos : " << pos << ", " << "size : " << size
-  //           << std::endl;
-  //  return uringCmd_.uringRead(direct ? read_direct_f_ : read_f_, pos, size,
-  //  buf);
-  //   return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
-  //    TODO: block align 문제로 인해, 기존 bdev pread로 사용 (fd도 bdev)
-  //    return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
-  //    LOG("POS", pos);
-  //    LOG("SIZE", size);
   return uringCmd_.uringCmdRead(direct ? read_direct_f_ : read_f_,
                                 fdp_.getNvmeData().nsId(), pos, size, buf);
 }
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
-  // std::cout << "Backend write" << "pos : " << pos << ", " << "size : " <<
-  // size
-  //           << std::endl;
-  //  TODO: uring_cmd 로 바꾸기
-  //  return pwrite(write_f_, data, size, pos);
-  //  TODO: dspec == pid
   uint32_t dspec = 0;
   return uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
                                  data, dspec);
