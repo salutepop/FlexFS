@@ -204,8 +204,6 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
                                &max_nr_open_zones);
   if (ios != IOStatus::OK()) return ios;
 
-  LOG("NrZones", zbd_be_->GetNrZones());
-
   if (zbd_be_->GetNrZones() < ZENFS_MIN_ZONES) {
     return IOStatus::NotSupported("To few zones on zoned backend (" +
                                   std::to_string(ZENFS_MIN_ZONES) +

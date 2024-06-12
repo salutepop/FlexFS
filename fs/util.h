@@ -3,6 +3,7 @@
 #include <cstdint> // for uint16_t, uint32_t
 #include <cstring>
 #include <fcntl.h>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <random>

@@ -5,6 +5,7 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
                    io_uring_params params)
     : qd_(qd), blocksize_(blocksize), lbashift_(lbashift), req_limitmax_(qd),
       req_limitlow_(qd >> 1), req_inflight_(0) {
+  req_id_ = 0;
   DBG("Construction", "UringCmd");
   initBuffer();
   initUring(params);
@@ -44,7 +45,7 @@ void UringCmd::initUring(io_uring_params &params) {
     p.flags |= IORING_SETUP_CQSIZE;
     p.cq_entries = qd_ * 2; // cq size = sq size * 2, to dealwith cq overflow
 
-    p.flags |= IORING_SETUP_COOP_TASKRUN;
+    // p.flags |= IORING_SETUP_COOP_TASKRUN;
     // p.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
     // p.flags |= IORING_SETUP_SINGLE_ISSUER;
 
@@ -64,12 +65,18 @@ void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
   // struct iovec iovec;
   // iovec.iov_base = buf;
   // iovec.iov_len = size;
+  // if (sqe == NULL) {
+  //  LOG("ERROR", "seq is null");
+  //  return;
+  //}
   memset(sqe, 0, sizeof(*sqe));
   sqe->fd = fd;
   sqe->cmd_op = NVME_URING_CMD_IO;
   // sqe->cmd_op = NVME_URING_CMD_IO_VEC;
   sqe->opcode = IORING_OP_URING_CMD;
+  // sqe->user_data = ++req_id_;
   sqe->user_data = 0;
+  // sqe->flags |= IOSQE_IO_LINK;
 
   cmd = (struct nvme_uring_cmd *)sqe->cmd;
   memset(cmd, 0, sizeof(struct nvme_uring_cmd));
@@ -145,11 +152,19 @@ int UringCmd::waitCompleted() {
   // err = io_uring_wait_cqe_nr(&ring_, &cqe, qd_);
   err = io_uring_wait_cqe(&ring_, &cqe);
   if (err != 0) {
-    DBG("uring_wait_cqe", err);
+    LOG("uring_wait_cqe", err);
   }
+  /*
   if (cqe->res < 0) {
     DBG("cqe->res", cqe->res);
   }
+  if (cqe->user_data == req_id_) {
+    DBG("[SUCCESS] REQ_ID", cqe->user_data);
+  } else {
+    LOG("[FAIL] USER_DATA", cqe->user_data);
+    LOG("[FAIL] CUR_REQ_ID_", req_id_);
+  }
+  */
   // DBG("[ERR] cq_has_overflow", io_uring_cq_has_overflow(&ring_));
   io_uring_cqe_seen(&ring_, cqe);
   return cqe->res;
@@ -167,65 +182,82 @@ int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
 }
 int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
+  std::lock_guard<std::mutex> lock(mutex_);
   int ret;
+  int maxBlocks = 64;
+  uint32_t maxTfrbytes = maxBlocks * blocksize_; // mdts :6 (2^6) blocks
+
+  // zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
+  off_t misOffset = offset - zOffset;
   off_t lastOffset = offset + size - 1;
-  uint32_t nBlocks = ((lastOffset - zOffset) / blocksize_) + 1;
-  uint64_t nSize = nBlocks * blocksize_;
-  uint32_t maxTfrbytes = 64 * blocksize_; // mdts :6 (2^6) blocks
+  int32_t left = lastOffset - zOffset + 1;
+  uint32_t nRead = 0;
+
+  // INFO: 너무 긴 경우(>2MB) 예외처리
   if (size > maxTfrbytes * 8) {
     return -EINVAL;
   }
-  // if (nSize > maxTfrbytes) {
-  //  nSize = maxTfrbytes;
-  //}
 
+  /*
   std::stringstream info;
-  info << "offset: " << offset << ", ";
+  info << "[Input] offset: " << offset << ", ";
   info << "size: " << size << ", ";
-  info << "zOffset: " << zOffset << ", ";
-  info << "nSize: " << nSize << ", ";
+  info << "[Calc] zOffset: " << zOffset << ", ";
+  info << "misOffset: " << misOffset << ", ";
   info << "lastOffset: " << lastOffset << ", ";
-  info << "nBlocks: " << nBlocks;
+  info << "left: " << left << ", ";
   DBG("Read Arguments", info.str());
+  */
 
-  if (nSize > maxTfrbytes) {
-    return -EINVAL;
+  void *tempBuf;
+  if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * 4)) {
+    LOG("[ERROR]", "MEM Align");
+    return -ENOMEM;
   }
-  bool isAligned =
-      // requested offset == zero based offset
-      (zOffset == offset) &&
-      // if not zero, need memcpy
-      ((size % blocksize_) == 0);
 
-  if (isAligned) {
-    prepUringCmd(fd, ns, op_read, offset, size, buf);
+  /*
+  else {
+    DBG("[PASS]", "READ Meme align");
+  }
+  */
+  while (left > 0) {
+    uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
+    nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
+
+    /*
+    info.clear();
+    info << "zOffset: " << zOffset << ", ";
+    info << "nCurSize: " << nCurSize << ", ";
+    info << "left: " << left << ", ";
+    info << "nRead: " << nRead << ", ";
+    info << "misOffset: " << misOffset << ", ";
+    DBG("Read Arguments", info.str());
+    */
+
+    prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)tempBuf + nRead);
     submitCommand();
     ret = waitCompleted();
-  } else {
-    DBG("Read warining, isn't aligned data (size or offset)", size);
-    void *tempBuf;
-    if (posix_memalign((void **)&tempBuf, PAGE_SIZE, nSize)) {
-      DBG("[ERROR]", "MEM Align");
+    if (ret < 0) {
+      return ret;
     }
-    prepUringCmd(fd, ns, op_read, zOffset, nSize, tempBuf);
-    submitCommand();
-    ret = waitCompleted();
-    if (ret == 0) {
-      memcpy(buf, (char *)tempBuf + (offset - zOffset), size);
-      ret = size;
-    }
-    free(tempBuf);
-  }
 
-  if (ret == 0) {
-    ret = size;
+    left -= nCurSize;
+    zOffset += nCurSize;
+    nRead += nCurSize;
   }
-  return ret;
+  // DBG("READ-tempBuf", (char *)tempBuf);
+  memcpy((char *)buf, (char *)tempBuf + misOffset, size);
+  free(tempBuf);
+
+  // TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
+  // return nRead;
+  return size;
 }
 
 int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
                             void *buf, uint32_t dspec) {
+  std::lock_guard<std::mutex> lock(mutex_);
   const uint32_t kPlacementMode = 2;
   int ret;
   int maxBlocks = 64;
@@ -235,59 +267,118 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   off_t zOffset = (offset / blocksize_) * blocksize_;
   off_t misOffset = offset - zOffset;
   off_t lastOffset = offset + size - 1;
-  uint32_t left = lastOffset - zOffset + 1;
+  int32_t left = lastOffset - zOffset + 1;
   uint32_t nWritten = 0;
-
-  std::stringstream info;
-  info << "[Input] offset: " << offset << ", ";
-  info << "size: " << size << ", ";
-  info << "[Calc] zOffset: " << zOffset << ", ";
-  info << "misOffset: " << misOffset << ", ";
-  info << "lastOffset: " << lastOffset << ", ";
-  DBG("Write Arguments", info.str());
 
   // INFO: 너무 긴 경우(>2MB) 예외처리
   if (size > maxTfrbytes * 8) {
     return -EINVAL;
   }
 
-  // TODO: do ~ while() 문으로 처리하고, nWrite-- 하는 방향으로 수정하기
-  // for (int i = 0; i < nloop; i++) {
   void *tempBuf;
   while (left > 0) {
-    uint32_t nCurrent = (left > maxTfrbytes) ? maxTfrbytes : left;
+    uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
+    std::stringstream info;
+    info << "[Input] offset: " << offset << ", ";
+    info << "size: " << size << ", ";
+    info << "[Calc] zOffset: " << zOffset << ", ";
+    info << "misOffset: " << misOffset << ", ";
+    info << "nCurSize: " << nCurSize << ", ";
+    info << "nWritten: " << nWritten << ", ";
+    info << "lastOffset: " << lastOffset << ", ";
+    DBG("Write Arguments", info.str());
 
-    if (misOffset) {
+    if (misOffset || nCurSize < blocksize_) {
       // TODO: Mis-aligned 발생 시, data compare 필요, 맨 아래 주석 코드 활용
       return -EIO;
 
-      DBG("Write Warning, isn't aligned data, do RMW. misOffset", misOffset);
+      LOG("Write Warning, isn't aligned data, do RMW. misOffset", misOffset);
 
       // INFO: Read-Modify-Write
-      if (posix_memalign((void **)&tempBuf, PAGE_SIZE, nCurrent)) {
-        DBG("[ERROR]", "MemAlign fail");
+      if (posix_memalign((void **)&tempBuf, PAGE_SIZE, nCurSize)) {
+        LOG("[ERROR]", "MemAlign fail");
         free(tempBuf);
         return -ENOMEM;
       }
-      ret = uringCmdRead(fd, ns, zOffset, nCurrent, tempBuf);
-      if ((uint32_t)ret != nCurrent) {
-        DBG("[ERROR]", "RMW-Read fail");
+      ret = uringCmdRead(fd, ns, zOffset, nCurSize, tempBuf);
+      if ((uint32_t)ret != nCurSize) {
+        LOG("[ERROR]", "RMW-Read fail");
         free(tempBuf);
         return -EINVAL;
       }
-      memcpy((char *)tempBuf + misOffset, buf, nCurrent - misOffset);
-      prepUringCmd(fd, ns, op_write, zOffset, nCurrent, tempBuf, kPlacementMode,
+      // memcpy((char *)tempBuf + misOffset, (char *)buf + nWritten, 2);
+      memcpy((char *)tempBuf + misOffset, (char *)buf + nWritten,
+             nCurSize - misOffset);
+      LOG("tempBuf(Written Data)", (char *)tempBuf);
+      prepUringCmd(fd, ns, op_write, zOffset, nCurSize, tempBuf, kPlacementMode,
                    dspec);
+      submitCommand();
+      ret = waitCompleted();
       free(tempBuf);
     } else {
-      prepUringCmd(fd, ns, op_write, zOffset, nCurrent, (char *)buf + nWritten,
+      prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
                    kPlacementMode, dspec);
+      submitCommand();
+      ret = waitCompleted();
     }
-    submitCommand();
-    ret = waitCompleted();
     if (ret < 0) {
       // ERROR:
+      LOG("ERROR", ret);
       return ret;
+    } else {
+
+      /*
+      // INFO: Verify
+      void *cmpBuf;
+      if (posix_memalign((void **)&cmpBuf, PAGE_SIZE, nCurSize)) {
+        LOG("ERROR", "MEM Align");
+      } else {
+        memset(cmpBuf, 0, nCurSize);
+        ret = uringCmdRead(fd, ns, zOffset, nCurSize, cmpBuf);
+        if (memcmp((char *)buf + nWritten, (char *)cmpBuf, nCurSize) != 0) {
+          DBG("[ERROR]", "Data is not equal !!, Re-read");
+          LOG("[ERROR] Data is not equal, Write Arguments", info.str());
+
+          std::stringstream bufinfo;
+          char *buffer = static_cast<char *>(buf);
+          char *compare = static_cast<char *>(cmpBuf);
+          // for (uint32_t i = 0; i < nCurSize; i++) {
+          for (uint32_t i = 0; i < 4096 * 2; i++) {
+            if (i % 8 == 0) {
+              bufinfo << "\n"
+                      << std::hex << std::setw(6) << std::setfill('0') << i
+                      << "] ";
+            }
+            if ((buffer[i + nWritten] & 0xff) == (compare[i] & 0xff)) {
+              bufinfo << "                 |";
+            } else {
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(buffer[i]) & 0xff) << " ";
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(buffer[i + nCurSize]) & 0xff) << " ";
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(buffer[i + nCurSize * 2]) & 0xff)
+                      << " ";
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(buffer[i + nCurSize * 3]) & 0xff)
+                      << " ";
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(buffer[i + nWritten]) & 0xff) << " ";
+              bufinfo << std::hex << std::setw(2) << std::setfill('0')
+                      << (static_cast<int>(compare[i]) & 0xff) << "|";
+            }
+          }
+          DBG("1-4, Expected, After", bufinfo.str());
+          // LOG("BUF", (char *)buf + nWritten);
+          // LOG("cmpBuf", (char *)cmpBuf);
+          LOG("Write Arguments", info.str());
+          return -EIO;
+        } else {
+          DBG("[PASS]", "data is equal !!");
+        }
+        free(cmpBuf);
+      }
+      */
     }
 
     /* TODO: Mis-aligned 발생 시, 데이터 비교를 위한 코드
@@ -305,14 +396,58 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
       free(tempBuf);
     }
     */
-
-    DBG("Write Done, bytes", nCurrent - misOffset);
-    left -= nCurrent;
-    zOffset += nCurrent;
-    nWritten += nCurrent - misOffset;
+    // DBG("Write Done, bytes", nCurSize - misOffset);
+    left -= nCurSize;
+    zOffset += nCurSize;
+    nWritten += nCurSize - misOffset;
     // INFO: misOffset은 처음 한번만 반영
     misOffset = 0;
   }
   return nWritten;
 }
 int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
+
+int UringCmd::uringFsync(int fd, int ns) {
+  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+  struct io_uring_cqe *cqe;
+  struct nvme_uring_cmd *cmd;
+  int ret;
+  /* FSYNC
+  io_uring_prep_fsync(sqe, fd, 0);
+  */
+
+  /* NVMe Flush */
+  sqe->fd = fd;
+  sqe->cmd_op = NVME_URING_CMD_IO;
+  // sqe->cmd_op = NVME_URING_CMD_IO_VEC;
+  sqe->opcode = IORING_OP_URING_CMD;
+  sqe->user_data = 0;
+
+  cmd = (struct nvme_uring_cmd *)sqe->cmd;
+  // NVMe Flush 명령 설정
+  memset(cmd, 0, sizeof(struct nvme_uring_cmd));
+  cmd->opcode = 0x00; // NVMe FLUSH 명령어 코드
+  cmd->nsid = ns;     // Namespace ID
+  /* NVMe Flush END*/
+
+  ret = io_uring_submit(&ring_);
+  if (ret < 0) {
+    LOG("ERROR", "io_uring_submit");
+    return ret;
+  }
+
+  ret = io_uring_wait_cqe(&ring_, &cqe);
+  if (ret < 0) {
+    LOG("ERROR", "io_uring_wait_cqe");
+    return ret;
+  }
+  ret = cqe->res;
+  if (ret < 0) {
+    LOG("ERROR", "Fail fsync");
+    return ret;
+  }
+  io_uring_cqe_seen(&ring_, cqe);
+  LOG("COMPLETED", "NVMe Flush");
+
+  return ret;
+}

@@ -29,7 +29,8 @@ UringlibBackend::UringlibBackend(std::string bdevname)
       read_direct_f_(-1),
       write_f_(-1),
       fdp_(filename_),
-      uringCmd_(32, fdp_.getNvmeData().blockSize(),
+      // uringCmd_(32, fdp_.getNvmeData().blockSize(),
+      uringCmd_(1, fdp_.getNvmeData().blockSize(),
                 fdp_.getNvmeData().lbaShift(), io_uring_params{}) {}
 
 std::string UringlibBackend::ErrorToString(int err) {
@@ -180,9 +181,10 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
     *max_capacity = zbd_zone_capacity(&z);
   }
   */
-  unsigned int shift = ilog2(block_sz_);
   *offline = false;
-  *max_capacity = zone_sz_ << shift;
+  *max_capacity = zone_sz_;
+  // unsigned int shift = ilog2(block_sz_);
+  //*max_capacity = zone_sz_ << shift;
 
   DummyFunc(start);
   return IOStatus::OK();
@@ -221,8 +223,11 @@ int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
   uint32_t dspec = 0;
-  return uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
-                                 data, dspec);
+  int ret = 0;
+  ret = uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
+                                data, dspec);
+  // uringCmd_.uringFsync(write_f_, fdp_.getNvmeData().nsId());
+  return ret;
 }
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -3,6 +3,7 @@
 #include "util.h"
 #include <liburing.h>
 #include <linux/nvme_ioctl.h>
+#include <mutex>
 
 #define BS (4 * 1024)
 #define PAGE_SIZE 4096
@@ -30,6 +31,9 @@ private:
   io_uring_params params_;
   struct io_uring ring_;
   struct iovec *iovecs_;
+
+  unsigned int req_id_;
+  std::mutex mutex_;
 
   void initBuffer();
   void initUring(io_uring_params &params);
@@ -77,5 +81,6 @@ public:
   int uringCmdRead(int fd, int ns, off_t offset, size_t size, void *buf);
   int uringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
                     uint32_t dspec);
+  int uringFsync(int fd, int ns);
   int isCqOverflow();
 };

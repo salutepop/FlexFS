@@ -179,9 +179,6 @@ IOStatus ZenMetaLog::Read(Slice* slice) {
   size_t to_read = slice->size();
   int ret;
 
-  std::cout << "read_pos_ : " << read_pos_ << ", "
-            << "zone_->wp_ : " << zone_->wp_ << ", " << "to_read : " << to_read
-            << ", " << "zone_->start_ : " << zone_->start_ << ", " << std::endl;
   if (read_pos_ >= zone_->wp_) {
     // EOF
     slice->clear();
@@ -194,9 +191,6 @@ IOStatus ZenMetaLog::Read(Slice* slice) {
 
   while (read < to_read) {
     ret = zbd_->Read(data + read, read_pos_, to_read - read, false);
-
-    std::cout << "Read ret : " << ret << ", " << "data : " << data << ", "
-              << std::endl;
 
     if (ret == -1 && errno == EINTR) continue;
     if (ret < 0) return IOStatus::IOError("Read failed");
