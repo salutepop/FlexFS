@@ -1,10 +1,15 @@
 #include "uring_cmd.h"
+
 #include <liburing.h>
 
 UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
                    io_uring_params params)
-    : qd_(qd), blocksize_(blocksize), lbashift_(lbashift), req_limitmax_(qd),
-      req_limitlow_(qd >> 1), req_inflight_(0) {
+    : qd_(qd),
+      blocksize_(blocksize),
+      lbashift_(lbashift),
+      req_limitmax_(qd),
+      req_limitlow_(qd >> 1),
+      req_inflight_(0) {
   req_id_ = 0;
   DBG("Construction", "UringCmd");
   initBuffer();
@@ -43,7 +48,7 @@ void UringCmd::initUring(io_uring_params &params) {
     p.flags |= IORING_SETUP_CQE32;
 
     p.flags |= IORING_SETUP_CQSIZE;
-    p.cq_entries = qd_ * 2; // cq size = sq size * 2, to dealwith cq overflow
+    p.cq_entries = qd_ * 2;  // cq size = sq size * 2, to dealwith cq overflow
 
     // p.flags |= IORING_SETUP_COOP_TASKRUN;
     // p.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
@@ -60,15 +65,17 @@ void UringCmd::initUring(io_uring_params &params) {
 void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
                             size_t size, void *buf, uint32_t dtype,
                             uint32_t dspec) {
+retry:
   struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
   struct nvme_uring_cmd *cmd;
   // struct iovec iovec;
   // iovec.iov_base = buf;
   // iovec.iov_len = size;
-  // if (sqe == NULL) {
-  //  LOG("ERROR", "seq is null");
-  //  return;
-  //}
+  if (sqe == NULL) {
+    LOG("ERROR", "seq is null");
+    usleep(1000);
+    goto retry;
+  }
   memset(sqe, 0, sizeof(*sqe));
   sqe->fd = fd;
   sqe->cmd_op = NVME_URING_CMD_IO;
@@ -90,7 +97,6 @@ void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
   if (size < blocksize_) {
     nlb = 0;
   } else {
-
     nlb = (size >> lbashift_) - 1;
   }
 
@@ -145,12 +151,16 @@ int UringCmd::submitCommand(int nr_reqs) {
   return err;
 }
 
-int UringCmd::waitCompleted() {
+int UringCmd::waitCompleted(int nr_reqs) {
   struct io_uring_cqe *cqe = NULL;
   int err;
 
-  // err = io_uring_wait_cqe_nr(&ring_, &cqe, qd_);
-  err = io_uring_wait_cqe(&ring_, &cqe);
+  if (nr_reqs > 0) {
+    err = io_uring_wait_cqe_nr(&ring_, &cqe, nr_reqs);
+  } else {
+    err = io_uring_wait_cqe(&ring_, &cqe);
+  }
+
   if (err != 0) {
     LOG("uring_wait_cqe", err);
   }
@@ -182,10 +192,10 @@ int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
 }
 int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  // std::lock_guard<std::mutex> lock(mutex_);
   int ret;
   int maxBlocks = 64;
-  uint32_t maxTfrbytes = maxBlocks * blocksize_; // mdts :6 (2^6) blocks
+  uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   // zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
@@ -194,8 +204,13 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   int32_t left = lastOffset - zOffset + 1;
   uint32_t nRead = 0;
 
-  // INFO: 너무 긴 경우(>2MB) 예외처리
+  LOG(std::this_thread::get_id(), "[READ]");
+  // int lockStart = zOffset / blocksize_ / 1000;
+  // int lockSize = size / blocksize_;
+  //  //rangeLock_.lock(lockStart, lockSize);
+  //   INFO: 너무 긴 경우(>2MB) 예외처리
   if (size > maxTfrbytes * 8) {
+    // //rangeLock_.unlock(lockStart, lockSize);
     return -EINVAL;
   }
 
@@ -213,6 +228,7 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   void *tempBuf;
   if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * 4)) {
     LOG("[ERROR]", "MEM Align");
+    // //rangeLock_.unlock(lockStart, lockSize);
     return -ENOMEM;
   }
 
@@ -239,6 +255,7 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
     submitCommand();
     ret = waitCompleted();
     if (ret < 0) {
+      //  //rangeLock_.unlock(lockStart, lockSize);
       return ret;
     }
 
@@ -252,16 +269,18 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
 
   // TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
   // return nRead;
+  // //rangeLock_.unlock(lockStart, lockSize);
   return size;
 }
 
 int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
                             void *buf, uint32_t dspec) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  // std::lock_guard<std::mutex> lock(mutex_);
+
   const uint32_t kPlacementMode = 2;
-  int ret;
+  int ret = 0;
   int maxBlocks = 64;
-  uint32_t maxTfrbytes = maxBlocks * blocksize_; // mdts :6 (2^6) blocks
+  uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   // zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
@@ -269,14 +288,21 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   off_t lastOffset = offset + size - 1;
   int32_t left = lastOffset - zOffset + 1;
   uint32_t nWritten = 0;
+  int loop = 0;
 
-  // INFO: 너무 긴 경우(>2MB) 예외처리
+  LOG(std::this_thread::get_id(), "[WRITE]");
+  // int lockStart = zOffset / blocksize_ / 1000;
+  // int lockSize = size / blocksize_;
+  // rangeLock_.lock(lockStart, lockSize);
+  //    INFO: 너무 긴 경우(>2MB) 예외처리
   if (size > maxTfrbytes * 8) {
+    // rangeLock_.unlock(lockStart, lockSize);
     return -EINVAL;
   }
 
   void *tempBuf;
   while (left > 0) {
+    loop++;
     uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
     std::stringstream info;
     info << "[Input] offset: " << offset << ", ";
@@ -290,6 +316,7 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
 
     if (misOffset || nCurSize < blocksize_) {
       // TODO: Mis-aligned 발생 시, data compare 필요, 맨 아래 주석 코드 활용
+      // rangeLock_.unlock(lockStart, lockSize);
       return -EIO;
 
       LOG("Write Warning, isn't aligned data, do RMW. misOffset", misOffset);
@@ -298,12 +325,14 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
       if (posix_memalign((void **)&tempBuf, PAGE_SIZE, nCurSize)) {
         LOG("[ERROR]", "MemAlign fail");
         free(tempBuf);
+        // rangeLock_.unlock(lockStart, lockSize);
         return -ENOMEM;
       }
       ret = uringCmdRead(fd, ns, zOffset, nCurSize, tempBuf);
       if ((uint32_t)ret != nCurSize) {
         LOG("[ERROR]", "RMW-Read fail");
         free(tempBuf);
+        // rangeLock_.unlock(lockStart, lockSize);
         return -EINVAL;
       }
       // memcpy((char *)tempBuf + misOffset, (char *)buf + nWritten, 2);
@@ -324,9 +353,9 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     if (ret < 0) {
       // ERROR:
       LOG("ERROR", ret);
+      // rangeLock_.unlock(lockStart, lockSize);
       return ret;
     } else {
-
       /*
       // INFO: Verify
       void *cmpBuf;
@@ -381,21 +410,21 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
       */
     }
 
-    /* TODO: Mis-aligned 발생 시, 데이터 비교를 위한 코드
-    if (misOffset) {
-      void *cmpBuf;
-      if (posix_memalign((void **)&cmpBuf, PAGE_SIZE, nCurrent)) {
-        ret = uringCmdRead(fd, ns, zOffset, nCurrent, cmpBuf);
-        if (memcmp((char *)tempBuf, (char *)cmpBuf, nCurrent) != 0) {
-          DBG("[ERROR]", "RMW data is not equal !!");
-        } else {
-          DBG("[PASS]", "RMW data is equal !!");
-        }
-        free(cmpBuf);
+    // TODO: Mis-aligned 발생 시, 데이터 비교를 위한 코드
+    // if (true) {
+    void *cmpBuf;
+    if (!posix_memalign((void **)&cmpBuf, PAGE_SIZE, nCurSize)) {
+      ret = uringCmdRead(fd, ns, zOffset, nCurSize, cmpBuf);
+      // if (memcmp((char *)tempBuf, (char *)cmpBuf, nCurSize) != 0) {
+      if (memcmp((char *)buf + nWritten, (char *)cmpBuf, nCurSize) != 0) {
+        LOG("[ERROR]", "RMW data is not equal !!");
+        LOG("Read Arguments", info.str());
+        //  sleep(1);
       }
-      free(tempBuf);
+      free(cmpBuf);
     }
-    */
+    // free(tempBuf);
+    //}
     // DBG("Write Done, bytes", nCurSize - misOffset);
     left -= nCurSize;
     zOffset += nCurSize;
@@ -403,6 +432,14 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     // INFO: misOffset은 처음 한번만 반영
     misOffset = 0;
   }
+  /*
+  submitCommand(loop);
+  ret = waitCompleted(loop);
+  if (ret < 0) {
+    LOG("ERR", ret);
+  }
+  */
+  // rangeLock_.unlock(lockStart, lockSize);
   return nWritten;
 }
 int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
@@ -426,8 +463,8 @@ int UringCmd::uringFsync(int fd, int ns) {
   cmd = (struct nvme_uring_cmd *)sqe->cmd;
   // NVMe Flush 명령 설정
   memset(cmd, 0, sizeof(struct nvme_uring_cmd));
-  cmd->opcode = 0x00; // NVMe FLUSH 명령어 코드
-  cmd->nsid = ns;     // Namespace ID
+  cmd->opcode = 0x00;  // NVMe FLUSH 명령어 코드
+  cmd->nsid = ns;      // Namespace ID
   /* NVMe Flush END*/
 
   ret = io_uring_submit(&ring_);

@@ -30,7 +30,7 @@ UringlibBackend::UringlibBackend(std::string bdevname)
       write_f_(-1),
       fdp_(filename_),
       // uringCmd_(32, fdp_.getNvmeData().blockSize(),
-      uringCmd_(1, fdp_.getNvmeData().blockSize(),
+      uringCmd_(32, fdp_.getNvmeData().blockSize(),
                 fdp_.getNvmeData().lbaShift(), io_uring_params{}) {}
 
 std::string UringlibBackend::ErrorToString(int err) {

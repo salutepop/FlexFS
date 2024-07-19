@@ -40,6 +40,7 @@ private:
   void prepUringCmd(int fd, int ns, bool is_read, off_t offset, size_t size,
                     void *buf, uint32_t dtype = 0, uint32_t dspec = 0);
   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
+  RangeLock rangeLock_{917100};
 
 public:
   UringCmd(){};
@@ -74,7 +75,7 @@ public:
     prepUringCmd(fd, ns, op_write, offset, size, buf, kPlacementMode, dspec);
   }
   int submitCommand(int nr_reqs = 0);
-  int waitCompleted();
+  int waitCompleted(int nr_reqs = 0);
 
   int uringRead(int fd, off_t offset, size_t size, void *buf);
   int uringWrite(int fd, off_t offset, size_t size, void *buf);

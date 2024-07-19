@@ -818,6 +818,11 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
           "Allocating zone(new=%d) start: 0x%lx wp: 0x%lx lt: %d file lt: %d\n",
           new_zone, allocated_zone->start_, allocated_zone->wp_,
           allocated_zone->lifetime_, file_lifetime);
+    // printf(
+    //     "Allocating zone(new=%d) start: 0x%lx wp: 0x%lx lt: %d file lt:
+    //     %d\n",
+    //    new_zone, allocated_zone->start_, allocated_zone->wp_,
+    //   allocated_zone->lifetime_, file_lifetime);
   } else {
     PutOpenIOZoneToken();
   }

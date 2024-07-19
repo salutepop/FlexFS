@@ -47,6 +47,7 @@ IOStatus ZbdlibBackend::CheckScheduler() {
     return IOStatus::InvalidArgument("Failed to open " + path.str());
   }
 
+  /*
   std::string buf;
   getline(f, buf);
   if (buf.find("[mq-deadline]") == std::string::npos) {
@@ -54,6 +55,7 @@ IOStatus ZbdlibBackend::CheckScheduler() {
     return IOStatus::InvalidArgument(
         "Current ZBD scheduler is not mq-deadline, set it to mq-deadline.");
   }
+  */
 
   f.close();
   return IOStatus::OK();
