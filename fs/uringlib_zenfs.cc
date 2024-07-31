@@ -23,16 +23,27 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+thread_local std::unique_ptr<UringCmd> UringlibBackend::uringCmd_ = nullptr;
+
 UringlibBackend::UringlibBackend(std::string bdevname)
     : filename_("/dev/" + bdevname),
       read_f_(-1),
       read_direct_f_(-1),
       write_f_(-1),
-      fdp_(filename_),
-      // uringCmd_(32, fdp_.getNvmeData().blockSize(),
-      uringCmd_(32, fdp_.getNvmeData().blockSize(),
-                fdp_.getNvmeData().lbaShift(), io_uring_params{}) {}
+      fdp_(filename_) {}
+// INFO: Shared ring
+//      ,uringCmd_(32, fdp_.getNvmeData().blockSize(),
+//                fdp_.getNvmeData().lbaShift(), io_uring_params{}) {}
 
+void UringlibBackend::initializeUringCmd() {
+  uringCmd_ = std::make_unique<UringCmd>(32, fdp_.getNvmeData().blockSize(),
+                                         fdp_.getNvmeData().lbaShift(),
+                                         io_uring_params{});
+}
+
+bool UringlibBackend::isUringCmdInitialized() const {
+  return uringCmd_ != nullptr;
+}
 std::string UringlibBackend::ErrorToString(int err) {
   char *err_str = strerror(err);
   if (err_str != nullptr) return std::string(err_str);
@@ -217,16 +228,21 @@ int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
 }
 
 int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
-  return uringCmd_.uringCmdRead(direct ? read_direct_f_ : read_f_,
-                                fdp_.getNvmeData().nsId(), pos, size, buf);
+  if (!isUringCmdInitialized()) {
+    initializeUringCmd();
+  }
+  return uringCmd_->uringCmdRead(direct ? read_direct_f_ : read_f_,
+                                 fdp_.getNvmeData().nsId(), pos, size, buf);
 }
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
+  if (!isUringCmdInitialized()) {
+    initializeUringCmd();
+  }
   uint32_t dspec = 0;
   int ret = 0;
-  ret = uringCmd_.uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
-                                data, dspec);
-  // uringCmd_.uringFsync(write_f_, fdp_.getNvmeData().nsId());
+  ret = uringCmd_->uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
+                                 data, dspec);
   return ret;
 }
 

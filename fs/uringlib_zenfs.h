@@ -26,7 +26,7 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   int read_direct_f_;
   int write_f_;
   FdpNvme fdp_;
-  UringCmd uringCmd_;
+  static thread_local std::unique_ptr<UringCmd> uringCmd_;
 
  public:
   explicit UringlibBackend(std::string bdevname);
@@ -36,6 +36,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
     close(write_f_);
   }
 
+  void initializeUringCmd();  // 객체 초기화 함수
+  bool isUringCmdInitialized() const;
   IOStatus Open(bool readonly, bool exclusive, unsigned int *max_active_zones,
                 unsigned int *max_open_zones);
   std::unique_ptr<ZoneList> ListZones();

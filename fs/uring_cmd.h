@@ -38,9 +38,9 @@ private:
   void initBuffer();
   void initUring(io_uring_params &params);
   void prepUringCmd(int fd, int ns, bool is_read, off_t offset, size_t size,
-                    void *buf, uint32_t dtype = 0, uint32_t dspec = 0);
+                    void *buf, uint32_t dtype = 0, uint32_t dspec = 0,
+                    uint64_t userData = 0);
   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
-  RangeLock rangeLock_{917100};
 
 public:
   UringCmd(){};
