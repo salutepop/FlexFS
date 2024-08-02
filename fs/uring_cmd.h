@@ -38,8 +38,8 @@ private:
   void initBuffer();
   void initUring(io_uring_params &params);
   void prepUringCmd(int fd, int ns, bool is_read, off_t offset, size_t size,
-                    void *buf, uint32_t dtype = 0, uint32_t dspec = 0,
-                    uint64_t userData = 0);
+                    void *buf, uint64_t userData = 0, uint32_t dtype = 0,
+                    uint32_t dspec = 0);
   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
 
 public:
@@ -58,21 +58,7 @@ public:
       }
       free(iovecs_);
     }
-  }
-  // size = byte
-  void prepUringRead(int fd, off_t offset, size_t size, void *buf) {
-    prepUring(fd, op_read, offset, size, buf);
-  }
-  void prepUringWrite(int fd, off_t offset, size_t size, void *buf) {
-    prepUring(fd, op_write, offset, size, buf);
-  }
-  void prepUringCmdRead(int fd, int ns, off_t offset, size_t size, void *buf) {
-    prepUringCmd(fd, ns, op_read, offset, size, buf);
-  }
-  void prepUringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
-                         uint32_t dspec) {
-    const uint32_t kPlacementMode = 2;
-    prepUringCmd(fd, ns, op_write, offset, size, buf, kPlacementMode, dspec);
+    DBG("Uring Destruction", std::this_thread::get_id());
   }
   int submitCommand(int nr_reqs = 0);
   int waitCompleted(int nr_reqs = 0);
