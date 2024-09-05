@@ -127,6 +127,7 @@ class ZenMetaLog {
   IOStatus ReadRecord(Slice* record, std::string* scratch);
 
   Zone* GetZone() { return zone_; };
+  uint64_t GetReadPosition() { return read_pos_; };
 
  private:
   IOStatus Read(Slice* slice);

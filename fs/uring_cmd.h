@@ -2,8 +2,10 @@
 
 #include "util.h"
 #include <liburing.h>
+#include <linux/fs.h>
 #include <linux/nvme_ioctl.h>
 #include <mutex>
+#include <sys/ioctl.h>
 
 #define BS (4 * 1024)
 #define PAGE_SIZE 4096
@@ -69,5 +71,34 @@ public:
   int uringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
                     uint32_t dspec);
   int uringFsync(int fd, int ns);
+
+  // INFO:
+  // fd : block fd (@fdp->bfd)
+  // start, len : bytes
+  // ex) uint64_t _offset = 0x20000;
+  // ex) uint64_t _len = 0x1000 * 64;
+  // ex) uring_cmd->uringDiscard(fdp->bfd(), _offset, _len);
+  static inline int uringDiscard(int fd, uint64_t start, uint64_t len) {
+    uint64_t range[2];
+    uint64_t max_discard_byte = 3221225472; // 3GB
+    uint64_t discarded = 0;
+
+    // 3GB 씩 나눠서 discard
+    while (discarded < len) {
+      uint64_t len_ = len - discarded;
+      if (len_ > max_discard_byte)
+        len_ = max_discard_byte;
+
+      range[0] = start + discarded;
+      range[1] = len_;
+
+      if (ioctl(fd, BLKDISCARD, range))
+        return errno;
+
+      discarded += len_;
+    }
+    return 0;
+  }
+
   int isCqOverflow();
 };

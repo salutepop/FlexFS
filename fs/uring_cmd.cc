@@ -1,11 +1,16 @@
 #include "uring_cmd.h"
+
 #include <liburing.h>
 
 std::atomic_int cnt = 0;
 UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
                    io_uring_params params)
-    : qd_(qd), blocksize_(blocksize), lbashift_(lbashift), req_limitmax_(qd),
-      req_limitlow_(qd >> 1), req_inflight_(0) {
+    : qd_(qd),
+      blocksize_(blocksize),
+      lbashift_(lbashift),
+      req_limitmax_(qd),
+      req_limitlow_(qd >> 1),
+      req_inflight_(0) {
   req_id_ = 0;
   DBG("Uring Construction", std::this_thread::get_id());
   initBuffer();
@@ -44,7 +49,7 @@ void UringCmd::initUring(io_uring_params &params) {
     p.flags |= IORING_SETUP_CQE32;
 
     p.flags |= IORING_SETUP_CQSIZE;
-    p.cq_entries = qd_ * 2; // cq size = sq size * 2, to dealwith cq overflow
+    p.cq_entries = qd_ * 2;  // cq size = sq size * 2, to dealwith cq overflow
 
     // p.flags |= IORING_SETUP_COOP_TASKRUN;
     // p.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
@@ -187,7 +192,7 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
   int ret;
   int maxBlocks = 64;
-  uint32_t maxTfrbytes = maxBlocks * blocksize_; // mdts :6 (2^6) blocks
+  uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   // zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
@@ -213,26 +218,27 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
     uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
     nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
 
+    // LOG(zOffset, nCurSize);
     prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)tempBuf + nRead,
                  loop);
 
+    /*
     submitCommand();
     ret = waitCompleted();
     if (ret < 0) {
       LOG("ERR", ret);
     }
+    */
     left -= nCurSize;
     zOffset += nCurSize;
     nRead += nCurSize;
   }
   // TODO: Batch I/O 분석 필요
-  /*
   submitCommand();
   ret = waitCompleted(loop);
   if (ret < 0) {
     LOG("ERR", ret);
   }
-  */
   memcpy((char *)buf, (char *)tempBuf + misOffset, size);
   free(tempBuf);
 
@@ -246,7 +252,7 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   const uint32_t kPlacementMode = 2;
   int ret = 0;
   int maxBlocks = 64;
-  uint32_t maxTfrbytes = maxBlocks * blocksize_; // mdts :6 (2^6) blocks
+  uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   //  zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
@@ -272,8 +278,10 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     } else {
       prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
                    loop, kPlacementMode, dspec);
+      /*
       submitCommand();
       ret = waitCompleted();
+      */
     }
     if (ret < 0) {
       LOG("ERROR", ret);
@@ -287,13 +295,11 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     misOffset = 0;
   }
   // TODO: Batch I/O 분석 필요
-  /*
   submitCommand();
   ret = waitCompleted(loop);
   if (ret < 0) {
     LOG("ERR", ret);
   }
-  */
   return nWritten;
 }
 int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
@@ -316,8 +322,8 @@ int UringCmd::uringFsync(int fd, int ns) {
   cmd = (struct nvme_uring_cmd *)sqe->cmd;
   // NVMe Flush 명령 설정
   memset(cmd, 0, sizeof(struct nvme_uring_cmd));
-  cmd->opcode = 0x00; // NVMe FLUSH 명령어 코드
-  cmd->nsid = ns;     // Namespace ID
+  cmd->opcode = 0x00;  // NVMe FLUSH 명령어 코드
+  cmd->nsid = ns;      // Namespace ID
   /* NVMe Flush END*/
 
   ret = io_uring_submit(&ring_);

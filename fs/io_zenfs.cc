@@ -369,6 +369,7 @@ IOStatus ZoneFile::InvalidateCache(uint64_t pos, uint64_t size) {
 
 IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
                                   char* scratch, bool direct) {
+  // LOG(GetFilename(), offset);
   ZenFSMetricsLatencyGuard guard(zbd_->GetMetrics(), ZENFS_READ_LATENCY,
                                  Env::Default());
   zbd_->GetMetrics()->ReportQPS(ZENFS_READ_QPS, 1);
@@ -520,6 +521,8 @@ IOStatus ZoneFile::BufferedAppend(char* buffer, uint32_t data_size) {
 
     uint64_t extent_length = wr_size;
 
+    // LOG("[Append] BufferAppend(+0B)", wr_size + pad_sz);
+    // zbd_->written_data_ += wr_size + pad_sz;
     s = active_zone_->Append(buffer, wr_size + pad_sz);
     if (!s.ok()) return s;
 
@@ -577,6 +580,9 @@ IOStatus ZoneFile::SparseAppend(char* sparse_buffer, uint32_t data_size) {
     uint64_t extent_length = wr_size - ZoneFile::SPARSE_HEADER_SIZE;
     EncodeFixed64(sparse_buffer, extent_length);
 
+    // LOG("[Append] SparseAppend(+8B)", wr_size + pad_sz);
+    // zbd_->written_data_ += wr_size + pad_sz - 8;
+    // zbd_->written_header_ += 8;
     s = active_zone_->Append(sparse_buffer, wr_size + pad_sz);
     if (!s.ok()) return s;
 
@@ -633,6 +639,8 @@ IOStatus ZoneFile::Append(void* data, int data_size) {
     wr_size = left;
     if (wr_size > active_zone_->capacity_) wr_size = active_zone_->capacity_;
 
+    // LOG("[Append] ZoneFile(??B)", wr_size);
+    // zbd_->written_data_ += wr_size;
     s = active_zone_->Append((char*)data + offset, wr_size);
     if (!s.ok()) return s;
 
@@ -1010,6 +1018,8 @@ IOStatus ZonedWritableFile::Append(const Slice& data,
     if (s.ok()) wp += data.size();
   }
 
+  // zoneFile_->GetZbd()->append_data_ += data.size();
+  //  std::cout << "[CM-WriteZoned] Append " << data.size() << std::endl;
   return s;
 }
 
@@ -1040,6 +1050,9 @@ IOStatus ZonedWritableFile::PositionedAppend(const Slice& data, uint64_t offset,
     if (s.ok()) wp += data.size();
   }
 
+  // zoneFile_->GetZbd()->append_data_ += data.size();
+  //  std::cout << "[CM-WriteZoned] PositionedAppend " << data.size() <<
+  //  std::endl;
   return s;
 }
 
@@ -1101,6 +1114,7 @@ IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
     read_sz = length > read_sz ? read_sz : length;
     pad_sz = read_sz % block_sz == 0 ? 0 : (block_sz - (read_sz % block_sz));
 
+    LOG("MigrateData size(Read and write)", read_sz + pad_sz);
     int r = zbd_->Read(buf, offset, read_sz + pad_sz, true);
     if (r < 0) {
       free(buf);

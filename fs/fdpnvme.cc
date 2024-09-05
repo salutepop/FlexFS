@@ -15,9 +15,10 @@
  */
 
 #include "fdpnvme.h"
-#include "uring_cmd.h"
 
 #include <endian.h>
+
+#include "uring_cmd.h"
 
 FdpNvme::FdpNvme(const std::string &bdevName, bool isTest) {
   if (isTest) {
@@ -84,7 +85,7 @@ int FdpNvme::nvmeIOMgmtRecv(uint32_t cfd, uint32_t nsid, void *data,
   // in the following link:
   // https://nvmexpress.org/wp-content/uploads/NVM-Express-2.0-Ratified-TPs_20230111.zip
   uint32_t cdw10 = (op & 0xf) | (op_specific & 0xff << 16);
-  uint32_t cdw11 = (data_len >> 2) - 1; // cdw11 is 0 based
+  uint32_t cdw11 = (data_len >> 2) - 1;  // cdw11 is 0 based
 
   struct nvme_passthru_cmd cmd = {
       .opcode = nvme_cmd_io_mgmt_recv,
@@ -122,7 +123,7 @@ void FdpNvme::prepFdpUringCmdSqe(struct io_uring_sqe &sqe, void *buf,
 
   // start LBA of the IO = Req_start (offset in partition) + Partition_start
   uint64_t sLba = (start >> nvmeData_.lbaShift()) + nvmeData_.startLba();
-  uint32_t nLb = (size >> nvmeData_.lbaShift()) - 1; // nLb is 0 based
+  uint32_t nLb = (size >> nvmeData_.lbaShift()) - 1;  // nLb is 0 based
 
   /* cdw10 and cdw11 represent starting lba */
   cmd->cdw10 = sLba & 0xffffffff;
@@ -148,7 +149,7 @@ void FdpNvme::prepWriteUringCmdSqe(struct io_uring_sqe &sqe, void *buf,
   uint16_t pid;
 
   if (handle == -1) {
-    pid = getFdpPID(kDefaultPIDIdx); // Use the default stream
+    pid = getFdpPID(kDefaultPIDIdx);  // Use the default stream
   } else if (handle >= 0 && handle <= maxPIDIdx_) {
     pid = getFdpPID(static_cast<uint16_t>(handle));
   } else {
@@ -229,7 +230,7 @@ int FdpNvme::openNvmeDevice(bool isChar, const std::string &bdevName,
     if (isChar) {
       fd = open(getNvmeCharDevice(bdevName).c_str(), flags);
     } else {
-      fd = open(bdevName.c_str(), flags | O_DIRECT);
+      fd = open(bdevName.c_str(), flags);
     }
   } catch (const std::system_error &) {
     throw;

@@ -62,6 +62,8 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   capacity_ = 0;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
+  std::cout << "Real Zone " << idx << ", start = " << start_
+            << ", wp_ = " << wp_ << ", delta = " << wp_ - start_ << std::endl;
 }
 
 bool Zone::IsUsed() { return (used_capacity_ > 0); }
@@ -138,6 +140,7 @@ IOStatus Zone::Append(char *data, uint32_t size) {
 
   assert((size % zbd_->GetBlockSize()) == 0);
 
+  // LOG("[Write] ZoneAppend", left);
   while (left) {
     ret = zbd_be_->Write(ptr, left, wp_);
     if (ret < 0) {
@@ -174,7 +177,7 @@ Zone *ZonedBlockDevice::GetIOZone(uint64_t offset) {
 ZonedBlockDevice::ZonedBlockDevice(std::string path, ZbdBackendType backend,
                                    std::shared_ptr<Logger> logger,
                                    std::shared_ptr<ZenFSMetrics> metrics)
-    : logger_(logger), metrics_(metrics) {
+    : logger_(logger), metrics_(metrics), zbd_be_type_(backend) {
   if (backend == ZbdBackendType::kBlockDev) {
     zbd_be_ = std::unique_ptr<ZbdlibBackend>(new ZbdlibBackend(path));
     Info(logger_, "New Zoned Block Device: %s", zbd_be_->GetFilename().c_str());

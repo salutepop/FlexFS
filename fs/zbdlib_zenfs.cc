@@ -47,7 +47,6 @@ IOStatus ZbdlibBackend::CheckScheduler() {
     return IOStatus::InvalidArgument("Failed to open " + path.str());
   }
 
-  /*
   std::string buf;
   getline(f, buf);
   if (buf.find("[mq-deadline]") == std::string::npos) {
@@ -55,7 +54,6 @@ IOStatus ZbdlibBackend::CheckScheduler() {
     return IOStatus::InvalidArgument(
         "Current ZBD scheduler is not mq-deadline, set it to mq-deadline.");
   }
-  */
 
   f.close();
   return IOStatus::OK();
@@ -133,6 +131,8 @@ IOStatus ZbdlibBackend::Reset(uint64_t start, bool *offline,
   struct zbd_zone z;
   int ret;
 
+  // LOG("[Reset-Discard] Zone", start / zone_sz_);
+
   ret = zbd_reset_zones(write_f_, start, zone_sz_);
   if (ret) return IOStatus::IOError("Zone reset failed\n");
 
@@ -174,6 +174,7 @@ int ZbdlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
 }
 
 int ZbdlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
+  // LOG(pos, size);
   return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
 }
 

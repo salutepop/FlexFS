@@ -167,6 +167,8 @@ IOStatus ZenMetaLog::AddRecord(const Slice& slice) {
   EncodeFixed32(buffer + sizeof(uint32_t), record_sz);
   memcpy(buffer + sizeof(uint32_t) * 2, data, record_sz);
 
+  // LOG("[Append] Meta size", phys_sz);
+  // zbd_->written_meta_ += phys_sz;
   s = zone_->Append(buffer, phys_sz);
 
   free(buffer);
@@ -243,6 +245,7 @@ IOStatus ZenMetaLog::ReadRecord(Slice* record, std::string* scratch) {
 
   /* Next record starts on a block boundary */
   if (read_pos_ % bs_) read_pos_ += bs_ - (read_pos_ % bs_);
+  // LOG("READ POS", read_pos_);
 
   return IOStatus::OK();
 }
@@ -348,7 +351,12 @@ void ZenFS::LogFiles() {
   std::map<std::string, std::shared_ptr<ZoneFile>>::iterator it;
   uint64_t total_size = 0;
 
+  std::cout << "Encode Json" << std::endl;
+  // zbd_->EncodeJson(std::cout);
+
   Info(logger_, "  Files:\n");
+  std::cout << "Files :" << std::endl;
+
   for (it = files_.begin(); it != files_.end(); it++) {
     std::shared_ptr<ZoneFile> zFile = it->second;
     std::vector<ZoneExtent*> extents = zFile->GetExtents();
@@ -356,6 +364,9 @@ void ZenFS::LogFiles() {
     Info(logger_, "    %-45s sz: %lu lh: %d sparse: %u", it->first.c_str(),
          zFile->GetFileSize(), zFile->GetWriteLifeTimeHint(),
          zFile->IsSparse());
+    std::cout << it->first.c_str() << " sz: " << zFile->GetFileSize()
+              << ", lifehint: " << zFile->GetWriteLifeTimeHint()
+              << ", sparse: " << zFile->IsSparse() << std::endl;
     for (unsigned int i = 0; i < extents.size(); i++) {
       ZoneExtent* extent = extents[i];
       Info(logger_, "          Extent %u {start=0x%lx, zone=%u, len=%lu} ", i,
@@ -363,11 +374,31 @@ void ZenFS::LogFiles() {
            (uint32_t)(extent->zone_->start_ / zbd_->GetZoneSize()),
            extent->length_);
 
+      std::cout << "Extent " << extent->start_ << ", Zone="
+                << (uint32_t)(extent->zone_->start_ / zbd_->GetZoneSize())
+                << ", len=" << extent->length_ << std::endl;
+
       total_size += extent->length_;
     }
   }
   Info(logger_, "Sum of all files: %lu MB of data \n",
        total_size / (1024 * 1024));
+  std::cout << "Total size (MB), " << total_size / (1024 * 1024) << std::endl;
+  std::cout << "AppendSum (MB), "
+            << (zbd_->written_meta_.load() + zbd_->written_data_.load() +
+                zbd_->written_header_.load()) /
+                   1024 / 1024
+            << std::endl;
+  std::cout << "DB Append requests Total (MB), "
+            << zbd_->append_data_.load() / 1024 / 1024 << std::endl;
+  std::cout << "Written Total (MB), "
+            << zbd_->GetTotalBytesWritten() / 1024 / 1024 << std::endl;
+  std::cout << "Written Meta (MB), " << zbd_->written_meta_.load() / 1024 / 1024
+            << std::endl;
+  std::cout << "Written Data (MB), " << zbd_->written_data_.load() / 1024 / 1024
+            << std::endl;
+  std::cout << "Written Header (MB), "
+            << zbd_->written_header_.load() / 1024 / 1024 << std::endl;
 }
 
 void ZenFS::ClearFiles() {
@@ -1212,9 +1243,13 @@ Status ZenFS::DecodeFileUpdateFrom(Slice* slice, bool replace) {
 Status ZenFS::DecodeSnapshotFrom(Slice* input) {
   Slice slice;
 
+  // LOG("[DecodeSnapshot]", "ENTER");
+  // LOG("[DecodeSnapshot]", files_.size());
+  // LOG("[DecodeSnapshot]", input->size());
   assert(files_.size() == 0);
 
   while (GetLengthPrefixedSlice(input, &slice)) {
+    // LOG("[DecodeSnapshot] file_id", next_file_id_);
     std::shared_ptr<ZoneFile> zoneFile(
         new ZoneFile(zbd_, 0, &metadata_writer_));
     Status s = zoneFile->DecodeFrom(&slice);
@@ -1281,13 +1316,19 @@ Status ZenFS::RecoverFrom(ZenMetaLog* log) {
   while (!done) {
     IOStatus rs = log->ReadRecord(&record, &scratch);
     if (!rs.ok()) {
+      return Status::OK();
       Error(logger_, "Read recovery record failed with error: %s",
             rs.ToString().c_str());
       return Status::Corruption("ZenFS", "Metadata corruption");
     }
 
-    if (!GetFixed32(&record, &tag)) break;
+    // LOG("Record Size", record.size());
+    if (!GetFixed32(&record, &tag)) {
+      LOG("GetFixed fail", "");
+      break;
+    }
 
+    // LOG("[TAG]", tag);
     if (tag == kEndRecord) break;
 
     if (!GetLengthPrefixedSlice(&record, &data)) {
@@ -1361,6 +1402,7 @@ Status ZenFS::Mount(bool readonly) {
           "Need at least two non-offline meta zones to open for write");
     return Status::NotSupported();
   }
+  LOG("Metazones size", metazones.size());
 
   /* Find all valid superblocks */
   for (const auto z : metazones) {
@@ -1399,6 +1441,7 @@ Status ZenFS::Mount(bool readonly) {
 
   if (!seq_map.size()) return Status::NotFound("No valid superblock found");
 
+  LOG("[SEQMAP_SIZE]", seq_map.size());
   /* Sort superblocks by descending sequence number */
   std::sort(seq_map.begin(), seq_map.end(),
             std::greater<std::pair<uint32_t, uint32_t>>());
@@ -1415,6 +1458,7 @@ Status ZenFS::Mount(bool readonly) {
     std::string scratch;
     std::unique_ptr<ZenMetaLog> log = std::move(valid_logs[i]);
 
+    LOG("[SEQMAP] recoverFrom", i);
     s = RecoverFrom(log.get());
     if (!s.ok()) {
       if (s.IsNotFound()) {
@@ -1433,6 +1477,9 @@ Status ZenFS::Mount(bool readonly) {
     meta_log_ = std::move(log);
     break;
   }
+
+  std::cout << "[DEBUG] Meta Zone = " << r
+            << ", read_pos = " << meta_log_->GetReadPosition() << std::endl;
 
   if (!recovery_ok) {
     return Status::IOError("Failed to mount filesystem");
@@ -1495,6 +1542,66 @@ Status ZenFS::Mount(bool readonly) {
   }
 
   LogFiles();
+
+  // to Recover write pointer
+  {
+#include <cmath>
+    std::map<uint32_t, uint64_t> wps;
+    uint64_t zoneSize = zbd_->GetZoneSize();
+    uint32_t blockSize = zbd_->GetBlockSize();
+    uint64_t total_size = 0;
+
+    for (uint32_t zone; zone < zbd_->GetNrZones(); zone++) {
+      wps[zone] = zone * zoneSize;
+    }
+
+    std::map<std::string, std::shared_ptr<ZoneFile>>::iterator it;
+    for (it = files_.begin(); it != files_.end(); it++) {
+      std::shared_ptr<ZoneFile> zFile = it->second;
+      std::vector<ZoneExtent*> extents = zFile->GetExtents();
+      for (unsigned int i = 0; i < extents.size(); i++) {
+        ZoneExtent* extent = extents[i];
+        uint32_t zone_ = (uint32_t)(extent->zone_->start_ / zoneSize);
+        // RoundUp(end_ / blocksize) * blocksize
+        uint64_t wp_ =
+            std::ceil((double)(extent->start_ + extent->length_) / blockSize) *
+            blockSize;
+        //  std::cout << "Extent " << extent->start_ << ", Zone=" << zone_
+        //            << ", len=" << extent->length_
+        //            << ", st+len=" << extent->start_ + extent->length_
+        //            << ", wp_=" << wp_;
+
+        if (wps[zone_] < wp_) {
+          wps[zone_] = wp_;
+          //  std::cout << ", update wp";
+        }
+        // std::cout << std::endl;
+
+        total_size += extent->length_;
+      }
+    }
+    wps[r + 1] = meta_log_->GetReadPosition();
+
+    std::unique_ptr<ZoneList> zone_rep = zbd_->ListZones();
+    std::map<uint32_t, uint64_t>::iterator itz;
+    std::cout << "[Check write pointer] Start" << std::endl;
+    for (itz = wps.begin(); itz != wps.end(); itz++) {
+      uint64_t real_wp = zbd_->ZoneWp(zone_rep, itz->first);
+      uint64_t calc_wp = itz->second;
+      if (real_wp != calc_wp) {
+        std::cout << "[ERR] Zone: " << itz->first << ", real wp: " << real_wp
+                  << ", calc wp: " << calc_wp << std::endl;
+      }
+    }
+    if (zbd_->GetBackendType() == ZbdBackendType::kFdpDev) {
+      std::cout << "[DEBUG] Backend is Uring!" << std::endl;
+    } else if (zbd_->GetBackendType() == ZbdBackendType::kBlockDev) {
+      std::cout << "[DEBUG] Backend is ZonedBlockDev!" << std::endl;
+    } else if (zbd_->GetBackendType() == ZbdBackendType::kZoneFS) {
+      std::cout << "[DEBUG] Backend is ZoneFS!" << std::endl;
+    }
+    std::cout << "[Check write pointer] Done" << std::endl;
+  }
 
   return Status::OK();
 }

@@ -88,11 +88,13 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
 
   if (readonly) {
     write_f_ = -1;
+    write_bf_ = -1;
   } else {
     write_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_WRONLY);
-    if (write_f_ < 0) {
+    write_bf_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_WRONLY);
+    if ((write_f_ < 0) || (write_bf_ < 0)) {
       return IOStatus::InvalidArgument(
-          "Failed to open zoned block device for write: " +
+          "Failed to open character or block device for write: " +
           ErrorToString(errno));
     }
   }
@@ -148,11 +150,13 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
     zone.start = (n * zone_sz_);
     zone.len = zone_sz_;
     zone.capacity = zone_sz_;
-    if (n == 0) {
+    // if (n == 0) {
+    if (n < 2) {
       // superblock * 2
-      zone.wp = block_sz_ * 2;
+      zone.wp = zone.start + block_sz_ * 2;
     } else {
       zone.wp = zone.start;
+      // zone.wp = zone.start + zone.len - 1;
     }
 
     zone.type = ZBD_ZONE_TYPE_SWR;
@@ -171,6 +175,12 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
 
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
+  //  LOG("[Reset-Discard] Zone", start / zone_sz_);
+  int err;
+  err = uringCmd_->uringDiscard(write_bf_, start, zone_sz_);
+  if (err) {
+    return IOStatus::IOError("Discard fail");
+  }
   /*
   unsigned int report = 1;
   struct zbd_zone z;
@@ -197,7 +207,7 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
   // unsigned int shift = ilog2(block_sz_);
   //*max_capacity = zone_sz_ << shift;
 
-  DummyFunc(start);
+  // DummyFunc(start);
   return IOStatus::OK();
 }
 

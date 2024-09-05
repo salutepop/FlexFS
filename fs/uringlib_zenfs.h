@@ -22,9 +22,14 @@ namespace ROCKSDB_NAMESPACE {
 class UringlibBackend : public ZonedBlockDeviceBackend {
  private:
   std::string filename_;
+
+  // _f_ : character device
+  // _bf_ : block device
   int read_f_;
   int read_direct_f_;
   int write_f_;
+  int write_bf_;
+
   FdpNvme fdp_;
   static thread_local std::unique_ptr<UringCmd> uringCmd_;
 
@@ -89,6 +94,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   };
 
   std::string GetFilename() { return filename_; }
+
+  // std::vector<uint64_t> GetWritePointer();
 
  private:
   IOStatus CheckScheduler();

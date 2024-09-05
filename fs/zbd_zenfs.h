@@ -171,8 +171,14 @@ class ZonedBlockDevice {
 
   void EncodeJsonZone(std::ostream &json_stream,
                       const std::vector<Zone *> zones);
+  ZbdBackendType zbd_be_type_;
 
  public:
+  std::atomic<uint64_t> written_meta_{0};
+  std::atomic<uint64_t> written_header_{0};
+  std::atomic<uint64_t> written_data_{0};
+  std::atomic<uint64_t> append_data_{0};
+
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
                             std::shared_ptr<ZenFSMetrics> metrics =
@@ -230,6 +236,13 @@ class ZonedBlockDevice {
     return bytes_written_.load() - gc_bytes_written_.load();
   };
   uint64_t GetTotalBytesWritten() { return bytes_written_.load(); };
+
+  std::unique_ptr<ZoneList> ListZones() { return zbd_be_->ListZones(); };
+  uint64_t ZoneWp(std::unique_ptr<ZoneList> &zones, unsigned int idx) {
+    return zbd_be_->ZoneWp(zones, idx);
+  };
+
+  ZbdBackendType GetBackendType() { return zbd_be_type_; }
 
  private:
   IOStatus GetZoneDeferredStatus();
