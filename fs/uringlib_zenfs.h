@@ -36,6 +36,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
  public:
   explicit UringlibBackend(std::string bdevname);
   ~UringlibBackend() {
+    LOG("Close Uringlib backend, fd = ", write_f_);
+
     close(read_f_);
     close(read_direct_f_);
     close(write_f_);
@@ -50,7 +52,7 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   IOStatus Finish(uint64_t start);
   IOStatus Close(uint64_t start);
   int Read(char *buf, int size, uint64_t pos, bool direct);
-  int Write(char *data, uint32_t size, uint64_t pos);
+  int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
   int InvalidateCache(uint64_t pos, uint64_t size);
 
   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx) {

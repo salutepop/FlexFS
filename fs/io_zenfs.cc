@@ -521,8 +521,8 @@ IOStatus ZoneFile::BufferedAppend(char* buffer, uint32_t data_size) {
 
     uint64_t extent_length = wr_size;
 
-    // LOG("[Append] BufferAppend(+0B)", wr_size + pad_sz);
-    // zbd_->written_data_ += wr_size + pad_sz;
+    // LOG("[Append] BufferAppend(+0B)", extent_start_);
+    //  zbd_->written_data_ += wr_size + pad_sz;
     s = active_zone_->Append(buffer, wr_size + pad_sz);
     if (!s.ok()) return s;
 
@@ -712,6 +712,8 @@ IOStatus ZoneFile::Recover() {
   }
 
   if (zone->wp_ < extent_start_) {
+    std::cout << "Zone wp : " << zone->wp_
+              << " extent start : " << extent_start_ << std::endl;
     return IOStatus::IOError("Zone wp is smaller than active extent start");
   }
 
@@ -1114,7 +1116,7 @@ IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
     read_sz = length > read_sz ? read_sz : length;
     pad_sz = read_sz % block_sz == 0 ? 0 : (block_sz - (read_sz % block_sz));
 
-    LOG("MigrateData size(Read and write)", read_sz + pad_sz);
+    // LOG("MigrateData size(Read and write)", read_sz + pad_sz);
     int r = zbd_->Read(buf, offset, read_sz + pad_sz, true);
     if (r < 0) {
       free(buf);

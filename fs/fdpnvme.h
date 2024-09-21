@@ -16,11 +16,13 @@
 
 #pragma once
 
-#include "util.h"
 #include <liburing.h>
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
+
 #include <vector>
+
+#include "util.h"
 
 // Reference: https://github.com/axboe/fio/blob/master/engines/nvme.h
 // If the uapi headers installed on the system lacks nvme uring command
@@ -31,10 +33,10 @@
 #define NVME_IDENTIFY_CNS_NS 0
 #define NVME_CSI_NVM 0
 
-#define BLK_DEF_MAX_SECTORS 256 // 256KB
+#define BLK_DEF_MAX_SECTORS 256  // 256KB
 #define FDP_MAX_RUHS 128
 // TODO: get FDP Config (Reclaim Unit Nominal Size (RUNS))
-#define RU_SIZE 13079937024 // bytes
+#define RU_SIZE 13079937024  // bytes
 
 struct nvme_lbaf {
   __le16 ms;
@@ -122,14 +124,18 @@ enum nvme_admin_opcode {
 // This is needed because FDP-IO have to be sent through Io_Uring_Cmd interface.
 // So NVMe data is needed for initialization and IO cmd formation.
 class NvmeData {
-public:
+ public:
   NvmeData() = default;
   NvmeData &operator=(const NvmeData &) = default;
 
-  explicit NvmeData(uint32_t nsId, uint64_t nuse, uint32_t blockSize,
+  explicit NvmeData(uint32_t nsId, uint64_t ncap, uint32_t blockSize,
                     uint32_t lbaShift, uint32_t maxTfrSize, uint64_t startLba)
-      : nsId_(nsId), nuse_(nuse), blockSize_(blockSize), lbaShift_(lbaShift),
-        maxTfrSize_(maxTfrSize), startLba_(startLba) {}
+      : nsId_(nsId),
+        ncap_(ncap),
+        blockSize_(blockSize),
+        lbaShift_(lbaShift),
+        maxTfrSize_(maxTfrSize),
+        startLba_(startLba) {}
 
   // NVMe Namespace ID
   uint32_t nsId() const { return nsId_; }
@@ -144,11 +150,11 @@ public:
   // Start LBA of the disk partition.
   // It will be 0, if there is no partition and just an NS.
   uint64_t startLba() const { return startLba_; }
-  uint64_t nuse() const { return nuse_; }
+  uint64_t ncap() const { return ncap_; }
 
-private:
+ private:
   uint32_t nsId_;
-  uint64_t nuse_; // Namespace Utilization
+  uint64_t ncap_;  // Namespace Utilization
   uint32_t blockSize_;
   uint32_t lbaShift_;
   uint32_t maxTfrSize_;
@@ -161,7 +167,7 @@ private:
 // Note: IO with FDP semantics need to be sent through Io_Uring_cmd interface
 // as of now; and not supported through conventional block interfaces.
 class FdpNvme {
-public:
+ public:
   explicit FdpNvme(const std::string &fileName, bool isTest = false);
 
   FdpNvme(const FdpNvme &) = delete;
@@ -190,7 +196,7 @@ public:
   io_uring *getRing() { return &ring_; }
   uint16_t getMaxPid() { return maxPIDIdx_; }
 
-private:
+ private:
   std::string getNvmeCharDevice(const std::string &bdevName);
   // Open Nvme Character device for the given block dev @fileName.
   void openNvmeDevice(const std::string &fileName);

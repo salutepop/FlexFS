@@ -62,8 +62,9 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   capacity_ = 0;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
-  std::cout << "Real Zone " << idx << ", start = " << start_
-            << ", wp_ = " << wp_ << ", delta = " << wp_ - start_ << std::endl;
+  // std::cout << "Real Zone " << idx << " start = " << start_ << " wp_ = " <<
+  // wp_
+  //           << " delta = " << wp_ - start_ << std::endl;
 }
 
 bool Zone::IsUsed() { return (used_capacity_ > 0); }
@@ -142,7 +143,7 @@ IOStatus Zone::Append(char *data, uint32_t size) {
 
   // LOG("[Write] ZoneAppend", left);
   while (left) {
-    ret = zbd_be_->Write(ptr, left, wp_);
+    ret = zbd_be_->Write(ptr, left, wp_, static_cast<uint32_t>(lifetime_));
     if (ret < 0) {
       return IOStatus::IOError(strerror(errno));
     }
@@ -890,6 +891,20 @@ void ZonedBlockDevice::SetZoneDeferredStatus(IOStatus status) {
 void ZonedBlockDevice::GetZoneSnapshot(std::vector<ZoneSnapshot> &snapshot) {
   for (auto *zone : io_zones) {
     snapshot.emplace_back(*zone);
+  }
+}
+
+void ZonedBlockDevice::SetWritePointer(std::vector<uint64_t> wps) {
+  std::cout << "SetWritePointer" << std::endl;
+  // for (const auto z : meta_zones) {
+  //   std::cout << "Zone : " << z->GetZoneNr()
+  //             << " WP : " << wps.at(z->GetZoneNr()) << std::endl;
+  // }
+  for (const auto z : io_zones) {
+    // ZoneNr이 0부터 인지 1부터 인지 확인해봐야함
+    //  std::cout << "Zone : " << z->GetZoneNr()
+    //            << " WP : " << wps.at(z->GetZoneNr()) << std::endl;
+    z->wp_ = wps.at(z->GetZoneNr());
   }
 }
 

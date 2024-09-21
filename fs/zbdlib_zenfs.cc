@@ -178,7 +178,9 @@ int ZbdlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
   return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
 }
 
-int ZbdlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
+int ZbdlibBackend::Write(char *data, uint32_t size, uint64_t pos,
+                         uint32_t whint) {
+  (void)whint;
   return pwrite(write_f_, data, size, pos);
 }
 

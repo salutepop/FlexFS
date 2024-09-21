@@ -165,7 +165,7 @@ NvmeData FdpNvme::readNvmeInfo(const std::string &bdevName) {
   struct nvme_id_ns ns;
   int fd;
   __u32 nsid = 0, lba_size = 0, lba_shift = 0;
-  uint64_t nuse = 0;
+  uint64_t ncap = 0;
   uint64_t startLba{0};
 
   try {
@@ -186,14 +186,14 @@ NvmeData FdpNvme::readNvmeInfo(const std::string &bdevName) {
 
     lba_size = 1 << ns.lbaf[(ns.flbas & 0x0f)].ds;
     lba_shift = ilog2(lba_size);
-    nuse = ns.nuse;
+    ncap = ns.ncap;
 
     close(fd);
   } catch (const std::exception &e) {
     std::cout << e.what() << std::endl;
   }
 
-  return NvmeData{nsid,    nuse, lba_size, lba_shift, BLK_DEF_MAX_SECTORS,
+  return NvmeData{nsid,    ncap, lba_size, lba_shift, BLK_DEF_MAX_SECTORS,
                   startLba};
 }
 

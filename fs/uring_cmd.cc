@@ -12,7 +12,7 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
       req_limitlow_(qd >> 1),
       req_inflight_(0) {
   req_id_ = 0;
-  DBG("Uring Construction", std::this_thread::get_id());
+  LOG("Uring Construction", std::this_thread::get_id());
   initBuffer();
   initUring(params);
 }
@@ -242,8 +242,10 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   memcpy((char *)buf, (char *)tempBuf + misOffset, size);
   free(tempBuf);
 
-  // TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
-  // return nRead;
+  // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size "
+  //           << size << std::endl;
+  //   TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
+  //   return nRead;
   return size;
 }
 
@@ -300,6 +302,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   if (ret < 0) {
     LOG("ERR", ret);
   }
+  // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
+  //           << size << std::endl;
   return nWritten;
 }
 int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }

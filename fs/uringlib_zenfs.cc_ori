@@ -88,13 +88,11 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
 
   if (readonly) {
     write_f_ = -1;
-    write_bf_ = -1;
   } else {
     write_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_WRONLY);
-    write_bf_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_WRONLY);
-    if ((write_f_ < 0) || (write_bf_ < 0)) {
+    if (write_f_ < 0) {
       return IOStatus::InvalidArgument(
-          "Failed to open character or block device for write: " +
+          "Failed to open zoned block device for write: " +
           ErrorToString(errno));
     }
   }
@@ -105,15 +103,15 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
 
   NvmeData nvmeData = fdp_.getNvmeData();
 
-  // TODO: NCAP:hard-coding(RU_SIZE), 스펙 문서 163페이지 참고
+  // TODO: NUSE:hard-coding(RU_SIZE), 스펙 문서 163페이지 참고
   block_sz_ = nvmeData.blockSize();
   // zone_sz_ = RU_SIZE / block_sz_;
-  zone_sz_ = RU_SIZE;  // RU==Zone
-  // zone_sz_ = RU_SIZE / 128;
-  nr_zones_ = nvmeData.ncap() / (zone_sz_ / block_sz_);
+  zone_sz_ = RU_SIZE;
+  nr_zones_ = nvmeData.nuse() / (zone_sz_ / block_sz_);
   *max_active_zones = fdp_.getMaxPid() + 1;
   *max_open_zones = fdp_.getMaxPid() + 1;
 
+  /*
   std::stringstream info;
   info << "Open Backend" << "\n ";
   info << "read_f : " << read_f_ << "\n ";
@@ -124,13 +122,171 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   info << "max_active_zones : " << *max_active_zones << "\n ";
   info << "max_open_zones : " << *max_open_zones << "\n ";
   info << "max pid : " << fdp_.getMaxPid() << "\n ";
-  info << "nvmeData ncap : " << nvmeData.ncap() << "\n ";
+  info << "nvmeData nuse : " << nvmeData.nuse() << "\n ";
   info << "RU SIZE : " << RU_SIZE << " ";
   LOG("[DBG]", info.str());
+  */
 
   return IOStatus::OK();
 }
 
+std::vector<uint64_t> UringlibBackend::GetWritePointer() {
+  std::vector<Zone *> metazones = zbd_->GetMetaZones();
+  std::vector<std::unique_ptr<Superblock>> valid_superblocks;
+  std::vector<std::unique_ptr<ZenMetaLog>> valid_logs;
+  std::vector<Zone *> valid_zones;
+  std::vector<std::pair<uint32_t, uint32_t>> seq_map;
+
+  Status s;
+
+  /* We need a minimum of two non-offline meta data zones */
+  if (metazones.size() < 2) {
+    Error(logger_,
+          "Need at least two non-offline meta zones to open for write");
+    return Status::NotSupported();
+  }
+  LOG("Metazones size", metazones.size());
+
+  /* Find all valid superblocks */
+  for (const auto z : metazones) {
+    std::unique_ptr<ZenMetaLog> log;
+    std::string scratch;
+    Slice super_record;
+
+    if (!z->Acquire()) {
+      assert(false);
+      return Status::Aborted("Could not aquire busy flag of zone" +
+                             std::to_string(z->GetZoneNr()));
+    }
+
+    LOG("metazones", "1");
+    // log takes the ownership of z's busy flag.
+    log.reset(new ZenMetaLog(zbd_, z));
+
+    if (!log->ReadRecord(&super_record, &scratch).ok()) continue;
+
+    LOG("metazones", "2");
+    if (super_record.size() == 0) continue;
+
+    LOG("metazones", "3");
+    std::unique_ptr<Superblock> super_block;
+
+    super_block.reset(new Superblock());
+    s = super_block->DecodeFrom(&super_record);
+    if (s.ok()) s = super_block->CompatibleWith(zbd_);
+    if (!s.ok()) return s;
+
+    LOG("metazones", "4");
+    Info(logger_, "Found OK superblock in zone %lu seq: %u\n", z->GetZoneNr(),
+         super_block->GetSeq());
+
+    seq_map.push_back(std::make_pair(super_block->GetSeq(), seq_map.size()));
+    valid_superblocks.push_back(std::move(super_block));
+    valid_logs.push_back(std::move(log));
+    valid_zones.push_back(z);
+  }
+
+  if (!seq_map.size()) return Status::NotFound("No valid superblock found");
+
+  LOG("[SEQMAP_SIZE]", seq_map.size());
+  /* Sort superblocks by descending sequence number */
+  std::sort(seq_map.begin(), seq_map.end(),
+            std::greater<std::pair<uint32_t, uint32_t>>());
+
+  bool recovery_ok = false;
+  unsigned int r = 0;
+
+  /* Recover from the zone with the highest superblock sequence number.
+     If that fails go to the previous as we might have crashed when rolling
+     metadata zone.
+  */
+  for (const auto &sm : seq_map) {
+    uint32_t i = sm.second;
+    std::string scratch;
+    std::unique_ptr<ZenMetaLog> log = std::move(valid_logs[i]);
+
+    LOG("[SEQMAP] recoverFrom", i);
+    s = RecoverFrom(log.get());
+    if (!s.ok()) {
+      if (s.IsNotFound()) {
+        Warn(logger_,
+             "Did not find a valid snapshot, trying next meta zone. Error: %s",
+             s.ToString().c_str());
+        continue;
+      }
+
+      Error(logger_, "Metadata corruption. Error: %s", s.ToString().c_str());
+      return s;
+    }
+
+    r = i;
+    recovery_ok = true;
+    meta_log_ = std::move(log);
+    break;
+  }
+
+  if (!recovery_ok) {
+    return Status::IOError("Failed to mount filesystem");
+  }
+
+  Info(logger_, "Recovered from zone: %d", (int)valid_zones[r]->GetZoneNr());
+  superblock_ = std::move(valid_superblocks[r]);
+  zbd_->SetFinishTreshold(superblock_->GetFinishTreshold());
+
+  IOOptions foo;
+  IODebugContext bar;
+  s = target()->CreateDirIfMissing(superblock_->GetAuxFsPath(), foo, &bar);
+  if (!s.ok()) {
+    Error(logger_, "Failed to create aux filesystem directory.");
+    return s;
+  }
+
+  /* Free up old metadata zones, to get ready to roll */
+  for (const auto &sm : seq_map) {
+    uint32_t i = sm.second;
+    /* Don't reset the current metadata zone */
+    if (i != r) {
+      /* Metadata zones are not marked as having valid data, so they can be
+       * reset */
+      valid_logs[i].reset();
+    }
+  }
+
+  if (!readonly) {
+    s = Repair();
+    if (!s.ok()) return s;
+  }
+
+  if (readonly) {
+    Info(logger_, "Mounting READ ONLY");
+  } else {
+    std::lock_guard<std::mutex> lock(files_mtx_);
+    s = RollMetaZoneLocked();
+    if (!s.ok()) {
+      Error(logger_, "Failed to roll metadata zone.");
+      return s;
+    }
+  }
+
+  Info(logger_, "Superblock sequence %d", (int)superblock_->GetSeq());
+  Info(logger_, "Finish threshold %u", superblock_->GetFinishTreshold());
+  Info(logger_, "Filesystem mount OK");
+
+  if (!readonly) {
+    Info(logger_, "Resetting unused IO Zones..");
+    IOStatus status = zbd_->ResetUnusedIOZones();
+    if (!status.ok()) return status;
+    Info(logger_, "  Done");
+
+    if (superblock_->IsGCEnabled()) {
+      Info(logger_, "Starting garbage collection worker");
+      run_gc_worker_ = true;
+      gc_worker_.reset(new std::thread(&ZenFS::GCWorker, this));
+    }
+  }
+
+  LogFiles();
+}
 std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
   struct zbd_zone *zones;
   struct zbd_zone zone;
@@ -150,16 +306,12 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
     zone.len = zone_sz_;
     zone.capacity = zone_sz_;
     // if (n == 0) {
-    if (n < 3) {
-      // superblock * 2 + spare 1
-      // zone.wp = zone.start + block_sz_ * 10;
-
-      // end
-      // zone.wp = zone.start + zone.len - 1;
-      // start
-      zone.wp = zone.start;
+    if (n < 2) {
+      // superblock * 2
+      zone.wp = block_sz_ * 2;
     } else {
-      zone.wp = zone.start;
+      // zone.wp = zone.start;
+      zone.wp = zone.start + zone.len - 1;
     }
 
     zone.type = ZBD_ZONE_TYPE_SWR;
@@ -178,12 +330,7 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
 
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
-  //  LOG("[Reset-Discard] Zone", start / zone_sz_);
-  int err;
-  err = uringCmd_->uringDiscard(write_bf_, start, zone_sz_);
-  if (err) {
-    return IOStatus::IOError("Discard fail");
-  }
+  LOG("[Skip-Reset] LBA", start);
   /*
   unsigned int report = 1;
   struct zbd_zone z;
@@ -210,7 +357,7 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
   // unsigned int shift = ilog2(block_sz_);
   //*max_capacity = zone_sz_ << shift;
 
-  // DummyFunc(start);
+  DummyFunc(start);
   return IOStatus::OK();
 }
 
@@ -248,12 +395,11 @@ int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
                                  fdp_.getNvmeData().nsId(), pos, size, buf);
 }
 
-int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos,
-                           uint32_t whint) {
+int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos) {
   if (!isUringCmdInitialized()) {
     initializeUringCmd();
   }
-  uint32_t dspec = whint;
+  uint32_t dspec = 0;
   int ret = 0;
   ret = uringCmd_->uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
                                  data, dspec);

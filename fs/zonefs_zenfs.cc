@@ -335,7 +335,9 @@ int ZoneFsBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
   return read;
 }
 
-int ZoneFsBackend::Write(char *data, uint32_t size, uint64_t pos) {
+int ZoneFsBackend::Write(char *data, uint32_t size, uint64_t pos,
+                         uint32_t whint) {
+  (void)whint;
   uint64_t offset = LBAToZoneOffset(pos);
   int write_to_zone = std::min((uint64_t)size, zone_sz_ - offset);
   int written = 0;
@@ -362,9 +364,9 @@ int ZoneFsBackend::Write(char *data, uint32_t size, uint64_t pos) {
   return written;
 }
 
-bool ZoneFsBackend::ZoneIsSwr(__attribute__((unused))
-                              std::unique_ptr<ZoneList> &zones,
-                              __attribute__((unused)) unsigned int idx) {
+bool ZoneFsBackend::ZoneIsSwr(
+    __attribute__((unused)) std::unique_ptr<ZoneList> &zones,
+    __attribute__((unused)) unsigned int idx) {
   return true;
 };
 
@@ -384,17 +386,17 @@ bool ZoneFsBackend::ZoneIsActive(std::unique_ptr<ZoneList> &zones,
   struct stat *z = &((struct stat *)zones->GetData())[idx];
   return z->st_size > 0 && (uint64_t)z->st_size < zone_sz_;
 };
-bool ZoneFsBackend::ZoneIsOpen(__attribute__((unused))
-                               std::unique_ptr<ZoneList> &zones,
-                               __attribute__((unused)) unsigned int idx) {
+bool ZoneFsBackend::ZoneIsOpen(
+    __attribute__((unused)) std::unique_ptr<ZoneList> &zones,
+    __attribute__((unused)) unsigned int idx) {
   // With zonefs there is no way to determine if a zone is open. Since the
   // the zone list is obtained before any ZenFS activity is performed, we
   // assume that all zones are closed.
   return false;
 };
-uint64_t ZoneFsBackend::ZoneStart(__attribute__((unused))
-                                  std::unique_ptr<ZoneList> &zones,
-                                  unsigned int idx) {
+uint64_t ZoneFsBackend::ZoneStart(
+    __attribute__((unused)) std::unique_ptr<ZoneList> &zones,
+    unsigned int idx) {
   return idx * zone_sz_;
 };
 uint64_t ZoneFsBackend::ZoneMaxCapacity(

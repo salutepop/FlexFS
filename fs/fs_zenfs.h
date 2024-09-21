@@ -167,6 +167,7 @@ class ZenFS : public FileSystemWrapper {
     kFileDeletion = 3,
     kEndRecord = 4,
     kFileReplace = 5,
+    kWritePointer = 6,
   };
 
   void LogFiles();
@@ -195,10 +196,12 @@ class ZenFS : public FileSystemWrapper {
   void EncodeSnapshotTo(std::string* output);
   void EncodeFileDeletionTo(std::shared_ptr<ZoneFile> zoneFile,
                             std::string* output, std::string linkf);
+  void EncodeWritePointerTo(std::string* output);
 
   Status DecodeSnapshotFrom(Slice* input);
   Status DecodeFileUpdateFrom(Slice* slice, bool replace = false);
   Status DecodeFileDeletionFrom(Slice* slice);
+  Status DecodeWritePointerFrom(Slice* input, ZenMetaLog* log);
 
   Status RecoverFrom(ZenMetaLog* log);
 
@@ -457,6 +460,12 @@ class ZenFS : public FileSystemWrapper {
   IOStatus MigrateFileExtents(
       const std::string& fname,
       const std::vector<ZoneExtentSnapshot*>& migrate_exts);
+
+  void CustomDeleter() {
+    std::thread temp_th(&ZenFS::PersistSnapshot, this, meta_log_.get());
+    temp_th.join();
+    //  PersistSnapshot(meta_log_.get());
+  }
 
  private:
   const uint64_t GC_START_LEVEL =
