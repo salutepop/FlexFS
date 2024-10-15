@@ -63,6 +63,7 @@ class Zone {
   uint64_t max_capacity_;
   uint64_t wp_;
   Env::WriteLifeTimeHint lifetime_;
+  uint32_t pid_;
   std::atomic<uint64_t> used_capacity_;
 
   IOStatus Reset();
@@ -209,6 +210,7 @@ class ZonedBlockDevice {
   uint64_t GetZoneSize();
   uint32_t GetNrZones();
   std::vector<Zone *> GetMetaZones() { return meta_zones; }
+  std::vector<Zone *> GetIoZones() { return io_zones; }
 
   void SetFinishTreshold(uint32_t threshold) { finish_threshold_ = threshold; }
 

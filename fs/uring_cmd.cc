@@ -12,7 +12,7 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
       req_limitlow_(qd >> 1),
       req_inflight_(0) {
   req_id_ = 0;
-  LOG("Uring Construction", std::this_thread::get_id());
+  // LOG("Uring Construction", std::this_thread::get_id());
   initBuffer();
   initUring(params);
 }
@@ -191,7 +191,8 @@ int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
 int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
   int ret;
-  int maxBlocks = 64;
+  int maxBlocks = 64;  // 256KB
+  // int maxBlocks = 16;                             // 64KB
   uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   // zero-based offset(aligned)
@@ -203,12 +204,14 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   int loop = 0;
 
   //    INFO: 너무 긴 경우(>4MB, QD16) 예외처리
-  if (size > maxTfrbytes * 16) {
+  if (size > maxTfrbytes * 16) {  // 256KB
+    // if (size > maxTfrbytes * qd_) {  // 64KB
     return -EINVAL;
   }
 
   void *tempBuf;
   if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * 16)) {
+    // if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * qd_)) {
     LOG("[ERROR]", "MEM Align");
     return -ENOMEM;
   }
@@ -244,8 +247,8 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
 
   // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size "
   //           << size << std::endl;
-  //   TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
-  //   return nRead;
+  //    TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
+  //    return nRead;
   return size;
 }
 
@@ -253,7 +256,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
                             void *buf, uint32_t dspec) {
   const uint32_t kPlacementMode = 2;
   int ret = 0;
-  int maxBlocks = 64;
+  int maxBlocks = 64;  // 256KB
+  // int maxBlocks = 16;                             // 64KB
   uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
 
   //  zero-based offset(aligned)
@@ -266,6 +270,7 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
 
   //   INFO: 너무 긴 경우(>4MB) 예외처리
   if (size > maxTfrbytes * 16) {
+    // if (size > maxTfrbytes * qd_) {
     return -EINVAL;
   }
 
@@ -280,15 +285,27 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     } else {
       prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
                    loop, kPlacementMode, dspec);
-      /*
-      submitCommand();
-      ret = waitCompleted();
-      */
+      // submitCommand();
+      // ret = waitCompleted();
     }
+    /*
     if (ret < 0) {
       LOG("ERROR", ret);
       return ret;
     }
+
+    void *cmpBuf;
+    if (!posix_memalign((void **)&cmpBuf, PAGE_SIZE, nCurSize)) {
+      ret = uringCmdRead(fd, ns, zOffset, nCurSize, cmpBuf);
+      if (memcmp((char *)buf + nWritten, (char *)cmpBuf, nCurSize) != 0) {
+        LOG("[ERROR]", "RMW data is not equal !!");
+        LOG(zOffset, nCurSize);
+      } else {
+        LOG("[PASS]", "RMW data is equal !!");
+      }
+      free(cmpBuf);
+    }
+    */
 
     left -= nCurSize;
     zOffset += nCurSize;
@@ -302,6 +319,7 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   if (ret < 0) {
     LOG("ERR", ret);
   }
+  //
   // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
   //           << size << std::endl;
   return nWritten;

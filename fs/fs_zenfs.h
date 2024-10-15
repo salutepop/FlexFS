@@ -128,6 +128,12 @@ class ZenMetaLog {
 
   Zone* GetZone() { return zone_; };
   uint64_t GetReadPosition() { return read_pos_; };
+  void ResetWritePosition() {
+    // Roundup aligned block size for FDP SSD
+    zone_->wp_ = ((read_pos_ / bs_)) * bs_;
+    // zone_->wp_ = ((read_pos_ / bs_) + 1) * bs_;
+    // zone_->wp_ = zone_->start_ + zone_->max_capacity_ - bs_;
+  }
 
  private:
   IOStatus Read(Slice* slice);
@@ -175,6 +181,7 @@ class ZenFS : public FileSystemWrapper {
   std::string FormatPathLexically(fs::path filepath);
   IOStatus WriteSnapshotLocked(ZenMetaLog* meta_log);
   IOStatus WriteEndRecord(ZenMetaLog* meta_log);
+  IOStatus PersistWritePonter(ZenMetaLog* meta_log);
   IOStatus RollMetaZoneLocked();
   IOStatus PersistSnapshot(ZenMetaLog* meta_writer);
   IOStatus PersistRecord(std::string record);
@@ -462,7 +469,7 @@ class ZenFS : public FileSystemWrapper {
       const std::vector<ZoneExtentSnapshot*>& migrate_exts);
 
   void CustomDeleter() {
-    std::thread temp_th(&ZenFS::PersistSnapshot, this, meta_log_.get());
+    std::thread temp_th(&ZenFS::PersistWritePonter, this, meta_log_.get());
     temp_th.join();
     //  PersistSnapshot(meta_log_.get());
   }

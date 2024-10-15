@@ -56,7 +56,8 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
       busy_(false),
       start_(zbd_be->ZoneStart(zones, idx)),
       max_capacity_(zbd_be->ZoneMaxCapacity(zones, idx)),
-      wp_(zbd_be->ZoneWp(zones, idx)) {
+      wp_(zbd_be->ZoneWp(zones, idx)),
+      pid_(0) {
   lifetime_ = Env::WLTH_NOT_SET;
   used_capacity_ = 0;
   capacity_ = 0;
@@ -136,6 +137,7 @@ IOStatus Zone::Append(char *data, uint32_t size) {
   uint32_t left = size;
   int ret;
 
+  if (capacity_ < size) LOG("Not Enough capacity, WP: ", wp_);
   if (capacity_ < size)
     return IOStatus::NoSpace("Not enough capacity for append");
 
@@ -143,7 +145,8 @@ IOStatus Zone::Append(char *data, uint32_t size) {
 
   // LOG("[Write] ZoneAppend", left);
   while (left) {
-    ret = zbd_be_->Write(ptr, left, wp_, static_cast<uint32_t>(lifetime_));
+    // ret = zbd_be_->Write(ptr, left, wp_, static_cast<uint32_t>(lifetime_));
+    ret = zbd_be_->Write(ptr, left, wp_, pid_);
     if (ret < 0) {
       return IOStatus::IOError(strerror(errno));
     }
@@ -372,6 +375,12 @@ void ZonedBlockDevice::LogGarbageInfo() {
       garbage_rate =
           double(z->wp_ - z->start_ - z->used_capacity_) / z->max_capacity_;
     }
+    if (garbage_rate < 0) {
+      std::cout << "[ERROR] Zone " << z->GetZoneNr() << " gc rate "
+                << garbage_rate << " wp " << z->wp_ << " used_cap"
+                << z->used_capacity_ << " zone start " << z->start_
+                << std::endl;
+    }
     assert(garbage_rate >= 0);
     int idx = int((garbage_rate + 0.1) * 10);
     zone_gc_stat[idx]++;
@@ -437,6 +446,7 @@ IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
           if (!status.ok()) return status;
           continue;
         }
+        // z->lifetime_ = Env::WLTH_SHORT;
         *out_meta_zone = z;
         return IOStatus::OK();
       }
@@ -809,6 +819,17 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
       if (allocated_zone != nullptr) {
         assert(allocated_zone->IsBusy());
         allocated_zone->lifetime_ = file_lifetime;
+        switch (file_lifetime) {
+          case Env::WLTH_NOT_SET:
+            allocated_zone->pid_ = 0;
+            break;
+          case Env::WLTH_NONE:
+            allocated_zone->pid_ = 4;
+            break;
+          default:
+            allocated_zone->pid_ = file_lifetime - Env::WLTH_SHORT;
+            break;
+        }
         new_zone = true;
       } else {
         PutActiveIOZoneToken();
@@ -901,10 +922,18 @@ void ZonedBlockDevice::SetWritePointer(std::vector<uint64_t> wps) {
   //             << " WP : " << wps.at(z->GetZoneNr()) << std::endl;
   // }
   for (const auto z : io_zones) {
-    // ZoneNr이 0부터 인지 1부터 인지 확인해봐야함
-    //  std::cout << "Zone : " << z->GetZoneNr()
-    //            << " WP : " << wps.at(z->GetZoneNr()) << std::endl;
+    // io_zone의 ZoneNr은 3부터 시작.
     z->wp_ = wps.at(z->GetZoneNr());
+    // z->used_capacity_ = (z->wp_ - z->start_);
+    z->capacity_ = z->max_capacity_ - (z->wp_ - z->start_);
+    // std::cout << "Zone : " << z->GetZoneNr() << " WP : " << z->wp_ <<
+    // std::endl;
+    // std::cout << "Zone " << z->GetZoneNr() << " start " << z->start_ << " wp
+    // "
+    //<< z->wp_ << " used capa(restore) " << z->used_capacity_
+    //<< " used capa(wp-start) " << z->wp_ - z->start_ << " capacity "
+    //<< z->capacity_ << " diff(calc-restore) "
+    //<< z->wp_ - z->start_ - z->used_capacity_ << std::endl;
   }
 }
 

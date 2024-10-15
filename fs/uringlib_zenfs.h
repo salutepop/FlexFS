@@ -36,7 +36,7 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
  public:
   explicit UringlibBackend(std::string bdevname);
   ~UringlibBackend() {
-    LOG("Close Uringlib backend, fd = ", write_f_);
+    // LOG("Close Uringlib backend, fd = ", write_f_);
 
     close(read_f_);
     close(read_direct_f_);

@@ -108,8 +108,12 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   // TODO: NCAP:hard-coding(RU_SIZE), 스펙 문서 163페이지 참고
   block_sz_ = nvmeData.blockSize();
   // zone_sz_ = RU_SIZE / block_sz_;
-  zone_sz_ = RU_SIZE;  // RU==Zone
-  // zone_sz_ = RU_SIZE / 128;
+  // zone_sz_ = RU_SIZE;  // RU==Zone
+  // zone_sz_ = RU_SIZE;  // 500M GC, ?? i/o error
+  // zone_sz_ = RU_SIZE / 128;  // 700M GC, 800Mops i/o error
+  // zone_sz_ = RU_SIZE / 256;  // 700M GC, 800Mops i/o error
+  zone_sz_ = RU_SIZE / 512;  // 700M GC, 800Mops i/o error
+  //  zone_sz_ = RU_SIZE;
   nr_zones_ = nvmeData.ncap() / (zone_sz_ / block_sz_);
   *max_active_zones = fdp_.getMaxPid() + 1;
   *max_open_zones = fdp_.getMaxPid() + 1;
@@ -152,7 +156,7 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
     // if (n == 0) {
     if (n < 3) {
       // superblock * 2 + spare 1
-      // zone.wp = zone.start + block_sz_ * 10;
+      // zone.wp = zone.start + block_sz_ * 2;
 
       // end
       // zone.wp = zone.start + zone.len - 1;
@@ -178,7 +182,7 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
 
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
-  //  LOG("[Reset-Discard] Zone", start / zone_sz_);
+  // LOG("[Reset-Discard] Zone", start / zone_sz_);
   int err;
   err = uringCmd_->uringDiscard(write_bf_, start, zone_sz_);
   if (err) {
@@ -255,6 +259,11 @@ int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos,
   }
   uint32_t dspec = whint;
   int ret = 0;
+
+  // if ((whint > 2) && (size < 16384)) {
+  //   dspec = 6;  // max pid
+  // }
+
   ret = uringCmd_->uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
                                  data, dspec);
   return ret;

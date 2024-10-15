@@ -662,6 +662,7 @@ IOStatus ZoneFile::RecoverSparseExtents(uint64_t start, uint64_t end,
   int recovered_segments = 0;
   int ret;
 
+  // LOG("RecoverSparseExtents", linkfiles_[0]);
   ret = posix_memalign((void**)&buffer, sysconf(_SC_PAGESIZE), block_sz);
   if (ret) {
     return IOStatus::IOError("Out of memory while recovering");
@@ -676,9 +677,12 @@ IOStatus ZoneFile::RecoverSparseExtents(uint64_t start, uint64_t end,
       break;
     }
 
+    // LOG("RecoverSparseExtents Read, extent start", next_extent_start);
     extent_length = DecodeFixed64(buffer);
     if (extent_length == 0) {
-      s = IOStatus::IOError("Unexpected extent length while recovering");
+      LOG("[Error:length 0] RecoverSparseExtents Read, extent start",
+          next_extent_start);
+      // s = IOStatus::IOError("Unexpected extent length while recovering");
       break;
     }
     recovered_segments++;
@@ -712,7 +716,8 @@ IOStatus ZoneFile::Recover() {
   }
 
   if (zone->wp_ < extent_start_) {
-    std::cout << "Zone wp : " << zone->wp_
+    std::cout << "[ERROR] zone wp is smaller, Filename : " << linkfiles_[0]
+              << " Zone wp : " << zone->wp_
               << " extent start : " << extent_start_ << std::endl;
     return IOStatus::IOError("Zone wp is smaller than active extent start");
   }

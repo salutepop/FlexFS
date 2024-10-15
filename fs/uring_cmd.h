@@ -63,7 +63,7 @@ class UringCmd {
       }
       free(iovecs_);
     }
-    LOG("Uring Destruction : Threads", std::this_thread::get_id());
+    // LOG("Uring Destruction : Threads", std::this_thread::get_id());
   }
   int submitCommand(int nr_reqs = 0);
   int waitCompleted(int nr_reqs = 0);
