@@ -11,6 +11,7 @@
 
 #define BS (4 * 1024)
 #define PAGE_SIZE 4096
+#define MAX_TRF_SIZE (BS * 64)  // 256KB
 
 #define op_read true
 #define op_write false
@@ -38,6 +39,8 @@ class UringCmd {
 
   unsigned int req_id_;
   std::mutex mutex_;
+
+  void *readbuf_;
 
   void initBuffer();
   void initUring(io_uring_params &params);

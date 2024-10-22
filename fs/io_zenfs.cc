@@ -451,6 +451,7 @@ IOStatus ZoneFile::PositionedRead(uint64_t offset, size_t n, Slice* result,
   }
 
   if (r < 0) {
+    LOG("ERROR, r", r);
     s = IOStatus::IOError("pread error\n");
     read = 0;
   }
@@ -718,13 +719,19 @@ IOStatus ZoneFile::Recover() {
   if (zone->wp_ < extent_start_) {
     std::cout << "[ERROR] zone wp is smaller, Filename : " << linkfiles_[0]
               << " Zone wp : " << zone->wp_
-              << " extent start : " << extent_start_ << std::endl;
-    return IOStatus::IOError("Zone wp is smaller than active extent start");
+              << " extent start : " << extent_start_
+              << " is Sparse : " << is_sparse_ << std::endl;
+    if (zbd_->GetBackendType() != ZbdBackendType::kFdpDev) {
+      return IOStatus::IOError("Zone wp is smaller than active extent start");
+    }
   }
 
   /* How much data do we need to recover? */
   uint64_t to_recover = zone->wp_ - extent_start_;
-
+  if (zbd_->GetBackendType() == ZbdBackendType::kFdpDev) {
+    to_recover = zone->start_ + zone->max_capacity_ - extent_start_;
+    LOG("ToRecover", to_recover);
+  }
   /* Do we actually have any data to recover? */
   if (to_recover == 0) {
     /* Mark up the file as having no missing extents */

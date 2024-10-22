@@ -5,3 +5,5 @@ tests/results
 fs/version.h
 cscope*
 tags
+util/flexfs
+util/flexfs.dbg

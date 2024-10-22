@@ -37,6 +37,9 @@ void UringCmd::initBuffer() {
 }
 
 void UringCmd::initUring(io_uring_params &params) {
+  if (posix_memalign((void **)&readbuf_, PAGE_SIZE, MAX_TRF_SIZE * qd_)) {
+    LOG("Mem align Fail", "initUring");
+  }
   // 모든 멤버가 0으로 초기화된 io_uring_params 구조체를 생성
   io_uring_params empty_params;
   memset(&empty_params, 0, sizeof(empty_params));
@@ -191,10 +194,6 @@ int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
 int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
   int ret;
-  int maxBlocks = 64;  // 256KB
-  // int maxBlocks = 16;                             // 64KB
-  uint32_t maxTfrbytes = maxBlocks * blocksize_;  // mdts :6 (2^6) blocks
-
   // zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
   off_t misOffset = offset - zOffset;
@@ -203,26 +202,24 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   uint32_t nRead = 0;
   int loop = 0;
 
-  //    INFO: 너무 긴 경우(>4MB, QD16) 예외처리
-  if (size > maxTfrbytes * 16) {  // 256KB
+  // INFO: 너무 긴 경우(>8MB, QD32) 예외처리
+  if (size > MAX_TRF_SIZE * (qd_ - 1)) {  // 256KB
     // if (size > maxTfrbytes * qd_) {  // 64KB
+    LOG("over max buffersize", MAX_TRF_SIZE * (qd_ - 1));
+
+    std::cout << "offset " << offset << " size " << size << std::endl;
     return -EINVAL;
   }
 
-  void *tempBuf;
-  if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * 16)) {
-    // if (posix_memalign((void **)&tempBuf, PAGE_SIZE, maxTfrbytes * qd_)) {
-    LOG("[ERROR]", "MEM Align");
-    return -ENOMEM;
-  }
+  memset(readbuf_, 0, MAX_TRF_SIZE * qd_);
 
   while (left > 0) {
     loop++;
-    uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
+    uint32_t nCurSize = ((uint32_t)left > MAX_TRF_SIZE) ? MAX_TRF_SIZE : left;
     nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
 
     // LOG(zOffset, nCurSize);
-    prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)tempBuf + nRead,
+    prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)readbuf_ + nRead,
                  loop);
 
     /*
@@ -242,10 +239,10 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   if (ret < 0) {
     LOG("ERR", ret);
   }
-  memcpy((char *)buf, (char *)tempBuf + misOffset, size);
-  free(tempBuf);
+  memcpy((char *)buf, (char *)readbuf_ + misOffset, size);
 
-  // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size "
+  // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size
+  // "
   //           << size << std::endl;
   //    TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
   //    return nRead;
@@ -268,8 +265,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   uint32_t nWritten = 0;
   int loop = 0;
 
-  //   INFO: 너무 긴 경우(>4MB) 예외처리
-  if (size > maxTfrbytes * 16) {
+  //   INFO: 너무 긴 경우(>8MB) 예외처리
+  if (size > maxTfrbytes * qd_) {
     // if (size > maxTfrbytes * qd_) {
     return -EINVAL;
   }
@@ -320,7 +317,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     LOG("ERR", ret);
   }
   //
-  // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
+  // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size
+  // "
   //           << size << std::endl;
   return nWritten;
 }

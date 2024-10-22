@@ -508,8 +508,13 @@ IOStatus ZenFS::PersistWritePonter(ZenMetaLog* meta_log) {
   // PutFixed32(&writePointer, kEndRecord);
   s = meta_log->AddRecord(writePointer);
   LOG("Meta WP.", meta_log->GetZone()->wp_);
+
+  if (s == IOStatus::NoSpace()) {
+    Info(logger_, "Current meta zone full, rolling to next meta zone");
+    s = RollMetaZoneLocked();
+  }
   if (!s.ok()) {
-    std::cout << "[FAIL] record writepointer, PeersistWritePointer" << std::endl
+    std::cout << "[FAIL] record writepointer, PersistWritePointer" << std::endl
               << s.ToString() << std::endl;
     return IOStatus::IOError("Fail to record writepointer");
   }
@@ -1845,7 +1850,7 @@ Status ZenFS::Mount(bool readonly) {
       if (backend_wp < calc_wp) {
         std::cout << "[ERROR] Zone: " << itz->first
                   << ", backend wp: " << backend_wp << ", file wp: " << calc_wp
-                  << std::endl;
+                  << "file-be: " << calc_wp - backend_wp << std::endl;
       }
     }
     if (zbd_->GetBackendType() == ZbdBackendType::kFdpDev) {
