@@ -820,16 +820,83 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         assert(allocated_zone->IsBusy());
         allocated_zone->lifetime_ = file_lifetime;
         switch (file_lifetime) {
+          /* 241026, rocks hint all split, bg thread 4
           case Env::WLTH_NOT_SET:
             allocated_zone->pid_ = 0;
             break;
           case Env::WLTH_NONE:
+            allocated_zone->pid_ = 1;
+            break;
+          case Env::WLTH_SHORT:
+            allocated_zone->pid_ = 2;  // 0 > 1 change
+            break;
+          case Env::WLTH_MEDIUM:
+            allocated_zone->pid_ = 3;
+            break;
+          case Env::WLTH_LONG:
             allocated_zone->pid_ = 4;
             break;
+          case Env::WLTH_EXTREME:
+            allocated_zone->pid_ = 5;
+            break;
+            */
+          case Env::WLTH_NOT_SET:
+            allocated_zone->pid_ = 0;
+            break;
+          case Env::WLTH_NONE:
+            allocated_zone->pid_ = 0;
+            break;
+          case Env::WLTH_SHORT:
+            allocated_zone->pid_ = 0;  // 0 > 1 change
+            break;
+          case Env::WLTH_MEDIUM:
+            allocated_zone->pid_ = 1;
+            break;
+          case Env::WLTH_LONG:
+            allocated_zone->pid_ = 2;
+            break;
+          case Env::WLTH_EXTREME:
+            allocated_zone->pid_ = 3;
+            break;
+          case Env::WLTH_EXTREME_2:
+            allocated_zone->pid_ = 4;
+            break;
+          case Env::WLTH_EXTREME_3:
+            allocated_zone->pid_ = 5;
+            break;
+          case Env::WLTH_EXTREME_4:
+            allocated_zone->pid_ = 6;
+            break;
+            /* delete immediately lv6
+          case Env::WLTH_SHORT:
+            allocated_zone->pid_ = 0;  // 0 > 1 change
+            break;
+          case Env::WLTH_EXTREME_2:
+            allocated_zone->pid_ = 5;
+            break;
+          case Env::WLTH_EXTREME_3:
+            allocated_zone->pid_ = 6;
+            break;
+          case Env::WLTH_EXTREME_4:
+            allocated_zone->pid_ = 6;
+            break;
+            */
           default:
-            allocated_zone->pid_ = file_lifetime - Env::WLTH_SHORT;
+            LOG("[INVALID] write hint", file_lifetime);
+            allocated_zone->pid_ = 0;
             break;
         }
+        // switch (file_lifetime) {
+        //   case Env::WLTH_NOT_SET:
+        //     allocated_zone->pid_ = 0;
+        //     break;
+        //   case Env::WLTH_NONE:
+        //     allocated_zone->pid_ = 4;
+        //     break;
+        //   default:
+        //     allocated_zone->pid_ = file_lifetime - Env::WLTH_SHORT;
+        //     break;
+        // }
         new_zone = true;
       } else {
         PutActiveIOZoneToken();
@@ -928,7 +995,8 @@ void ZonedBlockDevice::SetWritePointer(std::vector<uint64_t> wps) {
     z->capacity_ = z->max_capacity_ - (z->wp_ - z->start_);
     // std::cout << "Zone : " << z->GetZoneNr() << " WP : " << z->wp_ <<
     // std::endl;
-    // std::cout << "Zone " << z->GetZoneNr() << " start " << z->start_ << " wp
+    // std::cout << "Zone " << z->GetZoneNr() << " start " << z->start_ << "
+    // wp
     // "
     //<< z->wp_ << " used capa(restore) " << z->used_capacity_
     //<< " used capa(wp-start) " << z->wp_ - z->start_ << " capacity "

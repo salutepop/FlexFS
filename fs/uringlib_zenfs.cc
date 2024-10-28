@@ -180,11 +180,23 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
   return zl;
 }
 
+IOStatus UringlibBackend::Delete(uint64_t start, uint64_t size) {
+  int err;
+  err = uringCmd_->uringDiscard(write_bf_, start, size);
+  std::cout << "[Delete] Offset : " << start << " Size : " << size << std::endl;
+  if (err) {
+    return IOStatus::IOError("Discard fail");
+  }
+  return IOStatus::OK();
+}
+
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
   // LOG("[Reset-Discard] Zone", start / zone_sz_);
   int err;
   err = uringCmd_->uringDiscard(write_bf_, start, zone_sz_);
+  // std::cout << "[Discard] Offset : " << start << " Size : " << zone_sz_
+  //<< std::endl;
   if (err) {
     return IOStatus::IOError("Discard fail");
   }

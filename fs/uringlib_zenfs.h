@@ -51,6 +51,7 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   IOStatus Reset(uint64_t start, bool *offline, uint64_t *max_capacity);
   IOStatus Finish(uint64_t start);
   IOStatus Close(uint64_t start);
+  IOStatus Delete(uint64_t start, uint64_t size);
   int Read(char *buf, int size, uint64_t pos, bool direct);
   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
   int InvalidateCache(uint64_t pos, uint64_t size);

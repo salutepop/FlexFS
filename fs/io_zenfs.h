@@ -108,6 +108,7 @@ class ZoneFile {
   uint64_t GetFileSize();
   void SetFileSize(uint64_t sz);
   void ClearExtents();
+  void ClearExtentsWithDelete();
 
   uint32_t GetBlockSize() { return zbd_->GetBlockSize(); }
   ZonedBlockDevice* GetZbd() { return zbd_; }

@@ -88,6 +88,11 @@ class ZoneFsBackend : public ZonedBlockDeviceBackend {
   uint64_t ZoneMaxCapacity(std::unique_ptr<ZoneList> &zones, unsigned int idx);
   uint64_t ZoneWp(std::unique_ptr<ZoneList> &zones, unsigned int idx);
   std::string GetFilename() { return mountpoint_; }
+  virtual IOStatus Delete(uint64_t start, uint64_t size) {
+    (void)start;
+    (void)size;
+    return IOStatus::OK();
+  };
 
  private:
   std::string ErrorToString(int err);

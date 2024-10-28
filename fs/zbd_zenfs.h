@@ -43,7 +43,7 @@ class ZoneList {
 
  public:
   ZoneList(void *data, unsigned int zone_count)
-      : data_(data), zone_count_(zone_count){};
+      : data_(data), zone_count_(zone_count) {};
   void *GetData() { return data_; };
   unsigned int ZoneCount() { return zone_count_; };
   ~ZoneList() { free(data_); };
@@ -109,6 +109,7 @@ class ZonedBlockDeviceBackend {
                          uint64_t *max_capacity) = 0;
   virtual IOStatus Finish(uint64_t start) = 0;
   virtual IOStatus Close(uint64_t start) = 0;
+  virtual IOStatus Delete(uint64_t start, uint64_t size) = 0;
   virtual int Read(char *buf, int size, uint64_t pos, bool direct) = 0;
   virtual int Write(char *data, uint32_t size, uint64_t pos,
                     uint32_t whint = 0) = 0;
@@ -133,7 +134,7 @@ class ZonedBlockDeviceBackend {
   uint32_t GetBlockSize() { return block_sz_; };
   uint64_t GetZoneSize() { return zone_sz_; };
   uint32_t GetNrZones() { return nr_zones_; };
-  virtual ~ZonedBlockDeviceBackend(){};
+  virtual ~ZonedBlockDeviceBackend() {};
 };
 
 enum class ZbdBackendType {
@@ -247,6 +248,9 @@ class ZonedBlockDevice {
 
   ZbdBackendType GetBackendType() { return zbd_be_type_; }
   void SetWritePointer(std::vector<uint64_t> wps);
+  IOStatus Delete(uint64_t start, uint64_t size) {
+    return zbd_be_->Delete(start, size);
+  }
 
  private:
   IOStatus GetZoneDeferredStatus();

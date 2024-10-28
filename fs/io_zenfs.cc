@@ -217,7 +217,7 @@ Status ZoneFile::MergeUpdate(std::shared_ptr<ZoneFile> update, bool replace) {
   SetFileModificationTime(update->GetFileModificationTime());
 
   if (replace) {
-    ClearExtents();
+    ClearExtentsWithDelete();
   }
 
   std::vector<ZoneExtent*> update_extents = update->GetExtents();
@@ -267,6 +267,18 @@ void ZoneFile::ClearExtents() {
 
     assert(zone && zone->used_capacity_ >= (*e)->length_);
     zone->used_capacity_ -= (*e)->length_;
+    delete *e;
+  }
+  extents_.clear();
+}
+
+void ZoneFile::ClearExtentsWithDelete() {
+  for (auto e = std::begin(extents_); e != std::end(extents_); ++e) {
+    Zone* zone = (*e)->zone_;
+
+    assert(zone && zone->used_capacity_ >= (*e)->length_);
+    zone->used_capacity_ -= (*e)->length_;
+    zbd_->Delete((*e)->start_, (*e)->length_);  // Delete immediately
     delete *e;
   }
   extents_.clear();

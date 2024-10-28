@@ -115,8 +115,8 @@ class ZenMetaLog {
     bs_ = zbd_->GetBlockSize();
     read_pos_ = zone->start_;
     // zone_->pid_ = 4;  // MANIFEST + META
-    zone_->pid_ = 0;  // SHORT + META (same)
-    // zone_->pid_ = 5;  // META only, MANIFEST=4
+    // zone_->pid_ = 0;  // SHORT + META (same)
+    zone_->pid_ = 6;  // META only, MANIFEST=4
   }
 
   virtual ~ZenMetaLog() {

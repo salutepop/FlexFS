@@ -83,6 +83,11 @@ class ZbdlibBackend : public ZonedBlockDeviceBackend {
     return zbd_zone_wp(z);
   };
 
+  virtual IOStatus Delete(uint64_t start, uint64_t size) {
+    (void)start;
+    (void)size;
+    return IOStatus::OK();
+  };
   std::string GetFilename() { return filename_; }
 
  private:
