@@ -25,9 +25,122 @@
 #include "rocksdb/io_status.h"
 #include "util.h"
 #include "zbd_zenfs.h"
+#define RA_BUFFER_SIZE 4 * 1024 * 1024  // 2MB
 
 namespace ROCKSDB_NAMESPACE {
 
+class PrefetchBuffer {
+ private:
+  bool valid_;
+  bool hit_;
+  uint64_t start_;
+  size_t len_;
+  size_t buffersize_;
+  char* buffer_;
+  uint64_t userdata_;
+  uint64_t expected_offset_;
+  int nr_ra_reqs_;
+  uint64_t start_lba_;
+  std::thread::id thread_id_;
+  std::atomic<bool> prefetch_in_progress_;
+
+ public:
+  PrefetchBuffer() {};
+  PrefetchBuffer(size_t buffersize);
+  ~PrefetchBuffer() { free(buffer_); }
+  void GetData(uint64_t start, size_t size, Slice* result, char* scratch);
+  char* GetBuffer() {
+    if (buffer_ == nullptr) {
+      if (posix_memalign((void**)&buffer_, 4096 /* PAGESIZE */, buffersize_)) {
+        LOG("[ERROR]", "MEM Align");
+      }
+    }
+    // std::cout << "[Buffer pointer] " << (void*)buffer_ << std::endl;
+    return buffer_;
+  }
+  bool IsInprogress() {
+    return prefetch_in_progress_.load(std::memory_order_acquire);
+  }
+  bool TrySetProgress() {
+    bool expected = false;
+    return prefetch_in_progress_.compare_exchange_strong(
+        expected, true, std::memory_order_acquire);
+  }
+  bool IsValid() { return valid_; }
+  size_t GetBufferSize() { return buffersize_; }
+  void Invalidate() {
+    valid_ = false;
+    hit_ = false;
+    start_ = -1;
+    len_ = -1;
+  }
+
+  bool IsSameThread() { return thread_id_ == std::this_thread::get_id(); }
+  void SetRequestStatus(uint64_t start, size_t len) {
+    thread_id_ = std::this_thread::get_id();
+    start_ = start;
+    len_ = len;
+    // inprogress_ = true;
+    valid_ = false;
+    // std::cout << "[RequestPrefetch] " << start << ", " << len << std::endl;
+  }
+  void SetCompletedStatus() {
+    // inprogress_ = false;
+    prefetch_in_progress_.store(false, std::memory_order_release);
+    valid_ = true;
+    hit_ = true;  // hit: true -> false -> invalid buffer
+    userdata_++;
+    /*
+      std::cout << "End prefetch data as hex (8 bytes): (offset : " << start_
+                << ") ";
+      for (size_t i = 0; i < 8; ++i) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0')
+                  << (static_cast<int>(buffer_[i]) & 0xFF) << " ";
+      }
+      std::cout << std::endl;
+      */
+  }
+
+  bool IsDataInBuffer(uint64_t start, size_t size) {
+    /*
+      std::cout << "[IsDataInBuffer] req start ,size | buffer start, size "
+                << start << ", " << size << " | " << start_ << ", " << len_
+                << std::endl;
+                */
+    //  valid status, double check
+    if (!IsValid()) {
+      return false;
+    }
+
+    if ((start >= start_) && (start + size <= start_ + len_)) {
+      return true;
+    }
+
+    if (IsSameThread()) {
+      if (hit_) {
+        hit_ = false;
+      } else {
+        valid_ = false;
+        // std::cout << "[Invalidate Buffer] req start ,size | buffer start,
+        // size "
+        //<< start << ", " << size << " | " << start_ << ", " << len_
+        //<< std::endl;
+      }
+    }
+
+    return false;
+  };
+  uint64_t GetUserData() {
+    userdata_ = start_lba_ + len_;
+    userdata_ |= (1ULL << 62);  // prefetch flag
+    return userdata_;
+  }
+  // uint64_t GetStartLba() { return start_lba_; }
+  void SetStartLba(uint64_t lba) { start_lba_ = lba; }
+  uint64_t GetExpectedOffset() { return expected_offset_; }
+  int& GetNrRaReqs() { return nr_ra_reqs_; }
+  void SetExpectedOffset(uint64_t value) { expected_offset_ = value; }
+};
 class ZoneExtent {
  public:
   uint64_t start_;
@@ -79,6 +192,7 @@ class ZoneFile {
 
   std::mutex writer_mtx_;
   std::atomic<int> readers_{0};
+  PrefetchBuffer* prefetch_buffer_;
 
  public:
   static const int SPARSE_HEADER_SIZE = 8;
@@ -153,6 +267,20 @@ class ZoneFile {
   const std::vector<std::string>& GetLinkFiles() const { return linkfiles_; }
 
   IOStatus InvalidateCache(uint64_t pos, uint64_t size);
+
+  void RequestPrefetch(off_t start);
+  bool IsInitializedPrefetchBuffer();
+  void InitializePrefetchBuffer();
+  bool IsDataInBuffer(off_t start, size_t size);
+  bool IsPrefetchBufferAvailable(off_t start, size_t size);
+  uint64_t GetExpectedOffset() { return prefetch_buffer_->GetExpectedOffset(); }
+  void ReadFromBuffer(off_t start, size_t size, Slice* result, char* scratch) {
+    prefetch_buffer_->GetData(start, size, result, scratch);
+  }
+  void SetExpectedOffset(off_t value) {
+    prefetch_buffer_->SetExpectedOffset(value);
+  }
+  void InvalidateBuffer() { prefetch_buffer_->Invalidate(); }
 
  private:
   void ReleaseActiveZone();

@@ -249,7 +249,9 @@ ZoneFile::ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id,
       file_id_(file_id),
       nr_synced_extents_(0),
       m_time_(0),
-      metadata_writer_(metadata_writer) {}
+      metadata_writer_(metadata_writer) {
+  prefetch_buffer_ = nullptr;
+}
 
 std::string ZoneFile::GetFilename() { return linkfiles_[0]; }
 time_t ZoneFile::GetFileModificationTime() { return m_time_; }
@@ -259,7 +261,13 @@ void ZoneFile::SetFileSize(uint64_t sz) { file_size_ = sz; }
 void ZoneFile::SetFileModificationTime(time_t mt) { m_time_ = mt; }
 void ZoneFile::SetIOType(IOType io_type) { io_type_ = io_type; }
 
-ZoneFile::~ZoneFile() { ClearExtents(); }
+ZoneFile::~ZoneFile() {
+  if (IsInitializedPrefetchBuffer() && prefetch_buffer_->IsInprogress()) {
+    zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
+  }
+
+  ClearExtents();
+}
 
 void ZoneFile::ClearExtents() {
   for (auto e = std::begin(extents_); e != std::end(extents_); ++e) {
@@ -1115,7 +1123,41 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
                                      const IOOptions& /*options*/,
                                      Slice* result, char* scratch,
                                      IODebugContext* /*dbg*/) const {
-  return zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
+  IOStatus ret;
+  if (zoneFile_->IsPrefetchBufferAvailable(offset, n)) {
+    // std::cout << "[HIT] " << zoneFile_->GetFilename() << " : " << offset <<
+    // ", "
+    //           << n << std::endl;
+    //  ishit = true;
+    zoneFile_->GetZbd()->hitCounter++;
+    zoneFile_->ReadFromBuffer(offset, n, result, scratch);
+    zoneFile_->SetExpectedOffset(offset + n);
+
+    // memcpy(cmpBuf, scratch, n);
+    return IOStatus::OK();
+  } else {
+    // std::cout << "[Invalidate read buffer] " << zoneFile_->GetFilename()
+    //<< std::endl;
+    // zoneFile_->InvalidateBuffer();
+  }
+  // Read
+  zoneFile_->GetZbd()->missCounter++;
+  ret = zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
+
+  // Readahead
+  // FIX: size threshold
+  // if (zoneFile_->GetExpectedOffset() == offset && n >= 8192) {
+  if (zoneFile_->GetExpectedOffset() == offset) {
+    // start offset : next read offset
+    // std::cout << "[Request Prefetch] " << offset + n << std::endl;
+    // std::cout << "[Request Prefetch] " << zoneFile_->GetFilename() << " : "
+    //          << offset << ", " << n << std::endl;
+    zoneFile_->RequestPrefetch(offset + n);
+
+  } else {
+    zoneFile_->SetExpectedOffset(offset + n);
+  }
+  return ret;
 }
 
 IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
@@ -1156,6 +1198,218 @@ IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
   return IOStatus::OK();
 }
 
-}  // namespace ROCKSDB_NAMESPACE
+PrefetchBuffer::PrefetchBuffer(size_t buffersize)
+    : valid_(false),
+      hit_(false),
+      start_(-1),
+      len_(-1),
+      buffersize_(buffersize),
+      userdata_(1),
+      expected_offset_(-1),
+      nr_ra_reqs_(0),
+      prefetch_in_progress_(false) {
+  // std::cout << "[Pointer] buffer_ " << buffer_ << ", &Buffer " << &buffer_
+  //<< std::endl;
+  buffer_ = nullptr;
+  // if (posix_memalign((void**)&buffer_, 4096 /* PAGESIZE */, buffersize)) {
+  // LOG("[ERROR]", "MEM Align");
+  //}
+  // std::cout << "[Construction PrefetchBuffer] Thread "
+  //          << std::this_thread::get_id() << " buffer size " << buffersize
+  //          << " buffer pointer" << (void*)buffer_ << std::endl;
+  // " buffer Pointer " << buffer_ << std::endl;
+}
+void PrefetchBuffer::GetData(uint64_t start, size_t size, Slice* result,
+                             char* scratch) {
+  uint64_t shift = start - start_;
+  char* ptr;
+  ptr = scratch;
+  // std::cout << "[PrefetchBuffer_GetData] buffer pointer " << (void*)buffer_
+  //           << ", buffer start " << start_ << " req start " << start << ", "
+  //           << size << ", shift " << shift << std::endl;
+  memcpy((char*)ptr, (char*)buffer_ + shift, size);
+  *result = Slice((char*)scratch, size);
 
+  /*
+  std::cout << "Scratch data as hex (8 bytes): (offset : " << start << ") ";
+  for (size_t i = 0; i < 8; ++i) {
+    std::cout << std::hex << std::setw(2) << std::setfill('0')
+              << (static_cast<int>(ptr[i]) & 0xFF) << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "Buffer data as hex (8 bytes): (offset : " << start << ") ";
+  for (size_t i = 0; i < 8; ++i) {
+    std::cout << std::hex << std::setw(2) << std::setfill('0')
+              << (static_cast<int>(buffer_[i + shift]) & 0xFF) << " ";
+  }
+  std::cout << std::endl;
+  */
+}
+
+bool ZoneFile::IsInitializedPrefetchBuffer() {
+  return prefetch_buffer_ != nullptr;
+}
+
+void ZoneFile::InitializePrefetchBuffer() {
+  prefetch_buffer_ = new PrefetchBuffer(RA_BUFFER_SIZE);
+}
+
+void ZoneFile::RequestPrefetch(off_t start) {
+  // LOG(GetFilename(), offset);
+  // ManualReadLock();
+
+  // already request, skip this prefetch
+  if (!prefetch_buffer_->TrySetProgress()) {
+    return;
+  }
+
+  // std::cout << "[Request Prefetch] Thread " << std::this_thread::get_id()
+  //<< " filename " << GetFilename() << std::endl;
+  char* ptr;
+  size_t n = prefetch_buffer_->GetBufferSize();
+  uint64_t r_off;
+  size_t r_sz;
+  ZoneExtent* extent;
+  uint64_t extent_end;
+
+  r_off = 0;
+  extent = GetExtent(start, &r_off);
+  if (!extent) {
+    /* read start beyond end of (synced) file data*/
+    prefetch_buffer_->Invalidate();
+    return;
+  }
+
+  prefetch_buffer_->SetStartLba(r_off);
+  extent_end = extent->start_ + extent->length_;
+
+  /* Limit read size to end of file */
+  if ((r_off + n) > extent_end)
+    r_sz = extent_end - r_off;
+  else
+    r_sz = n;
+
+  int block_sz = zbd_->GetBlockSize();
+  uint64_t zOffset = (r_off / block_sz) * block_sz;
+
+  // if (zOffset != r_off) {
+  // std::cout << "un-aligned, dev offset " << r_off << " zOffset " << zOffset
+  //<< std::endl;
+  //}
+
+  prefetch_buffer_->SetRequestStatus(start, r_sz);
+
+  /*
+  std::cout << "[Request Prefetch] " << std::this_thread::get_id() << " : "
+            << GetFilename() << " : start " << extent->start_ << ", length "
+            << extent->length_ << ", real_offset " << r_off << ", offset "
+            << start << ", size " << r_sz << " userdata "
+            << prefetch_buffer_->GetUserData() << std::endl;
+            */
+
+  ptr = prefetch_buffer_->GetBuffer();
+  zbd_->RequestPrefetch(ptr, r_sz, zOffset, prefetch_buffer_->GetUserData());
+
+  // zbd_->WaitPrefetch(prefetch_buffer_->GetUserData(),
+  // prefetch_buffer_->GetNrRaReqs());
+  // prefetch_buffer_->SetCompletedStatus();
+  //  std::cout << "[Request Prefetch] Done" << std::endl;
+}
+
+/*
+void ZoneFile::RequestPrefetch(off_t start) {
+  if (!prefetch_buffer_->IsInprogress()) {
+    // using aligned offset
+    int block_sz = zbd_->GetBlockSize();
+    off_t zOffset = (start / block_sz) * block_sz;
+    // max. readahead size == buffer size
+    size_t remain_size = file_size_ - zOffset;
+    size_t size = prefetch_buffer_->GetBufferSize() < remain_size
+                      ? prefetch_buffer_->GetBufferSize()
+                      : remain_size;
+
+    // char* buf = prefetch_buffer_->GetBuffer();
+
+    // std::cout << "[ZoneFile::RequestPrefetch] file_id " << file_id_ << ", buf
+    // "
+    //<< (void*)buf << " start " << start << " zOffset " << zOffset
+    //<< " size " << size << std::endl;
+    // store zOffset value
+    prefetch_buffer_->SetRequestStatus(zOffset);
+    char* tmpBuf;
+    if (posix_memalign((void**)&tmpBuf, 4096, RA_BUFFER_SIZE)) {
+      LOG("[ERROR]", "MEM Align");
+    }
+    zbd_->RequestPrefetch(tmpBuf, size, zOffset,
+                          prefetch_buffer_->GetUserData());
+    // zbd_->RequestPrefetch(prefetch_buffer_->GetBuffer(), size, zOffset,
+    // prefetch_buffer_->GetUserData());
+
+    // temp
+    zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
+    prefetch_buffer_->SetCompletedStatus();
+
+    std::cout << "tmpBuf data as hex (8 bytes): (offset : " << zOffset << ") ";
+    for (size_t i = 0; i < 8; ++i) {
+      std::cout << std::hex << std::setw(2) << std::setfill('0')
+                << (static_cast<int>(tmpBuf[i]) & 0xFF) << " ";
+    }
+    std::cout << std::endl;
+  }
+}
+*/
+
+bool ZoneFile::IsPrefetchBufferAvailable(off_t start, size_t size) {
+  int ret = 0;
+  // std::cout << "[IsPrefetchBufferAvailable] " << start << " " << size
+  //<< std::endl;
+
+  if (!IsInitializedPrefetchBuffer()) {
+    InitializePrefetchBuffer();
+  }
+
+  // if (!prefetch_buffer_->IsMyBuffer(GetFilename())) {
+  // return false;
+  //}
+
+  // 1) valid buffer 라면,
+  if (prefetch_buffer_->IsValid() &&
+      prefetch_buffer_->IsDataInBuffer(start, size)) {
+    // std::cout << "[1. Valid Buffer] " << std::this_thread::get_id() << " : "
+    //<< GetFilename() << " : " << start << ", " << size << std::endl;
+    return true;
+  }
+  // 2) prefeching 중이면 대기
+  else if (prefetch_buffer_->IsSameThread() &&
+           prefetch_buffer_->IsInprogress()) {
+    /*
+    if (!prefetch_in_progress_.load(std::memory_order_acquire)) {
+      std::cout << "Prefetch not progress." << std::endl;
+      return false;
+    }
+    */
+    // std::cout << "[2. Inprogress readahead] " << std::this_thread::get_id()
+    //<< " : " << GetFilename() << " : " << start << ", " << size
+    //<< std::endl;
+    ret = zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
+    // 플래그 해제
+    // ManualReadUnlock();
+    if (ret < 0) {
+      LOG("ERR", ret);
+      return false;
+    }
+    prefetch_buffer_->SetCompletedStatus();
+    if (prefetch_buffer_->IsDataInBuffer(start, size)) {
+      // std::cout << "[2-2] Hit " << std::this_thread::get_id() << " : "
+      //<< GetFilename() << " : " << start << ", " << size << std::endl;
+      return true;
+    }
+  }
+  // 3) prefetch 요청도 없었고, 완료도 안되었으면
+  // std::cout << "[3. NULL] " << std::this_thread::get_id() << " : "
+  //<< GetFilename() << " : " << start << ", " << size << std::endl;
+  return false;
+}
+
+}  // namespace ROCKSDB_NAMESPACE
 #endif  // !defined(ROCKSDB_LITE) && !defined(OS_WIN)

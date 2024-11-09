@@ -55,6 +55,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
   int Read(char *buf, int size, uint64_t pos, bool direct);
   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
   int InvalidateCache(uint64_t pos, uint64_t size);
+  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata);
+  int WaitPrefetch(uint64_t userdata);
 
   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx) {
     struct zbd_zone *z = &((struct zbd_zone *)zones->GetData())[idx];

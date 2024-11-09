@@ -281,6 +281,28 @@ int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos,
   return ret;
 }
 
+int UringlibBackend::RequestPrefetch(char *buf, int size, uint64_t pos,
+                                     uint64_t userdata) {
+  //(void)userdata;
+  // std::cout << "[UringlibBackend::RequestPrefetch] buffer pointer "
+  //<< (void *)buf << " size " << size << std::endl;
+  if (!isUringCmdInitialized()) {
+    initializeUringCmd();
+  }
+  return uringCmd_->uringRequestPrefetch(
+      read_direct_f_, fdp_.getNvmeData().nsId(), pos, size, buf, userdata);
+  // return uringCmd_->uringCmdRead(read_f_, fdp_.getNvmeData().nsId(), pos,
+  // size, buf);
+}
+
+int UringlibBackend::WaitPrefetch(uint64_t userdata) {
+  //(void)userdata;
+  // return 0;
+  if (!isUringCmdInitialized()) {
+    return -1;
+  }
+  return uringCmd_->uringWaitPrefetch(userdata);
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 #endif  // !defined(ROCKSDB_LITE) && !defined(OS_WIN)

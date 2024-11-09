@@ -405,6 +405,7 @@ ZonedBlockDevice::~ZonedBlockDevice() {
   for (const auto z : io_zones) {
     delete z;
   }
+  std::cout << "[Hit, Miss] " << hitCounter << ", " << missCounter << std::endl;
 }
 
 #define LIFETIME_DIFF_NOT_GOOD (100)

@@ -5,6 +5,7 @@
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
 
+#include <map>
 #include <mutex>
 
 #include "util.h"
@@ -37,10 +38,11 @@ class UringCmd {
   struct io_uring ring_;
   struct iovec *iovecs_;
 
-  unsigned int req_id_;
   std::mutex mutex_;
 
   void *readbuf_;
+  size_t max_trf_size_;
+  std::map<uint64_t, int> requestedMap;
 
   void initBuffer();
   void initUring(io_uring_params &params);
@@ -50,7 +52,7 @@ class UringCmd {
   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
 
  public:
-  UringCmd(){};
+  UringCmd() {};
   UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
            io_uring_params params);
   ~UringCmd() {
@@ -77,6 +79,44 @@ class UringCmd {
   int uringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
                     uint32_t dspec);
   int uringFsync(int fd, int ns);
+  int waitTargetCompleted(uint64_t user_data);
+  int uringRequestPrefetch(int fd, int ns, off_t offset, size_t size, void *buf,
+                           uint64_t userdata);
+  int uringWaitPrefetch(uint64_t userdata);
+
+  // Add a request to the map
+  void addRequest(uint64_t userdata, int requested) {
+    requestedMap[userdata] = requested;  // Store the value directly
+  }
+
+  // Decrement the value associated with the given key
+  void decrementRequest(uint64_t userdata) {
+    auto it = requestedMap.find(userdata);
+    if (it != requestedMap.end()) {
+      --(it->second);  // Decrement the value
+    }
+  }
+
+  // Delete an entry by key
+  int deleteRequest(uint64_t userdata) {
+    auto it = requestedMap.find(userdata);
+    if (it != requestedMap.end()) {
+      requestedMap.erase(it);  // Remove the key-value pair
+      return 0;                // Indicate successful deletion
+    }
+    return -EINVAL;  // Key not found
+  }
+
+  // Get a reference to the value for a key
+  bool getNrRequested(uint64_t userdata, int *&requested) {
+    auto it = requestedMap.find(userdata);
+    if (it != requestedMap.end()) {
+      requested = &(it->second);  // Return the address of the value
+      return true;
+    }
+    requested = nullptr;
+    return false;
+  }
 
   // INFO:
   // fd : block fd (@fdp->bfd)

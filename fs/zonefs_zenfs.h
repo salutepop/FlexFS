@@ -79,6 +79,18 @@ class ZoneFsBackend : public ZonedBlockDeviceBackend {
   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
   int InvalidateCache(uint64_t pos, uint64_t size);
 
+  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata) {
+    (void)buf;
+    (void)size;
+    (void)pos;
+    (void)userdata;
+    return 0;
+  };
+  int WaitPrefetch(uint64_t userdata) {
+    (void)userdata;
+    return 0;
+  };
+
   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx);
   bool ZoneIsOffline(std::unique_ptr<ZoneList> &zones, unsigned int idx);
   bool ZoneIsWritable(std::unique_ptr<ZoneList> &zones, unsigned int idx);

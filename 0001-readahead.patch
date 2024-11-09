@@ -1,0 +1,1020 @@
+From 3e0234b20ea8c6f7c1fe778eaf44a4a22113ee9b Mon Sep 17 00:00:00 2001
+From: Changmin <salutepop@gmail.com>
+Date: Tue, 5 Nov 2024 13:40:26 +0900
+Subject: [PATCH] =?UTF-8?q?readahead=20=EA=B5=AC=ED=98=84?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ fs/io_zenfs.cc       | 227 ++++++++++++++++++++++++++++++++++++++++++-
+ fs/io_zenfs.h        | 106 +++++++++++++++++++-
+ fs/uring_cmd.cc      | 213 +++++++++++++++++-----------------------
+ fs/uring_cmd.h       |  68 +------------
+ fs/uringlib_zenfs.cc |  23 +++++
+ fs/uringlib_zenfs.h  |   2 +
+ fs/zbd_zenfs.cc      |   1 +
+ fs/zbd_zenfs.h       |  18 +++-
+ fs/zbdlib_zenfs.h    |  12 +++
+ fs/zonefs_zenfs.h    |  11 +++
+ 10 files changed, 483 insertions(+), 198 deletions(-)
+
+diff --git a/fs/io_zenfs.cc b/fs/io_zenfs.cc
+index e32d697..5d8261d 100644
+--- a/fs/io_zenfs.cc
++++ b/fs/io_zenfs.cc
+@@ -19,14 +19,12 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
+-#include <iostream>
+ #include <string>
+ #include <utility>
+ #include <vector>
+ 
+ #include "rocksdb/env.h"
+ #include "util/coding.h"
+-
+ namespace ROCKSDB_NAMESPACE {
+ 
+ ZoneExtent::ZoneExtent(uint64_t start, uint64_t length, Zone* zone)
+@@ -249,7 +247,11 @@ ZoneFile::ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id,
+       file_id_(file_id),
+       nr_synced_extents_(0),
+       m_time_(0),
+-      metadata_writer_(metadata_writer) {}
++      metadata_writer_(metadata_writer),
++      prefetch_buffer_(new PrefetchBuffer(RA_BUFFER_SIZE)) {
++  // std::cout << "[ZoneFile] id " << file_id_ << ", buffer pointer "
++  //<< (void*)prefetch_buffer_->GetBuffer() << std::endl;
++}
+ 
+ std::string ZoneFile::GetFilename() { return linkfiles_[0]; }
+ time_t ZoneFile::GetFileModificationTime() { return m_time_; }
+@@ -259,7 +261,10 @@ void ZoneFile::SetFileSize(uint64_t sz) { file_size_ = sz; }
+ void ZoneFile::SetFileModificationTime(time_t mt) { m_time_ = mt; }
+ void ZoneFile::SetIOType(IOType io_type) { io_type_ = io_type; }
+ 
+-ZoneFile::~ZoneFile() { ClearExtents(); }
++ZoneFile::~ZoneFile() {
++  ClearExtents();
++  delete prefetch_buffer_;
++}
+ 
+ void ZoneFile::ClearExtents() {
+   for (auto e = std::begin(extents_); e != std::end(extents_); ++e) {
+@@ -1079,6 +1084,8 @@ IOStatus ZonedSequentialFile::Read(size_t n, const IOOptions& /*options*/,
+                                    IODebugContext* /*dbg*/) {
+   IOStatus s;
+ 
++  // std::cout << "Sequential File, Read " << rp << ", " << n << " (next) "
++  //<< rp + n << std::endl;
+   s = zoneFile_->PositionedRead(rp, n, result, scratch, direct_);
+   if (s.ok()) rp += result->size();
+ 
+@@ -1096,6 +1103,8 @@ IOStatus ZonedSequentialFile::PositionedRead(uint64_t offset, size_t n,
+                                              const IOOptions& /*options*/,
+                                              Slice* result, char* scratch,
+                                              IODebugContext* /*dbg*/) {
++  // std::cout << "Sequential File, PositionedRead " << offset << ", " << n
++  //<< " (next) " << offset + n << std::endl;
+   return zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
+ }
+ 
+@@ -1103,7 +1112,48 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
+                                      const IOOptions& /*options*/,
+                                      Slice* result, char* scratch,
+                                      IODebugContext* /*dbg*/) const {
+-  return zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
++  IOStatus ret;
++  // std::cout << "RandomAccess File, Read " << offset << ", " << n << " (next)
++  // "
++  //<< offset + n << std::endl;
++  if (zoneFile_->IsPrefetchBufferAvailable(offset, n)) {
++    // std::cout << "[HIT] " << offset << ", " << n << std::endl;
++    //  std::cout << "[Source Buffer pointer] " << (void*)result << std::endl;
++    zoneFile_->GetZbd()->hitCounter++;
++    zoneFile_->ReadFromBuffer(offset, n, result, scratch);
++    zoneFile_->SetExpectedOffset(offset + n);
++    return IOStatus::OK();
++  } else {
++    // std::cout << "[Invalidate read buffer]" << std::endl;
++    zoneFile_->InvalidateBuffer();
++  }
++
++  // std::cout << "[MISS] " << offset << ", " << n << std::endl;
++  zoneFile_->GetZbd()->missCounter++;
++  //  Read
++  ret = zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
++
++  /*
++  std::cout << "PositionedRead data as hex (8 bytes): (offset : " << offset
++            << ") ";
++  for (size_t i = 0; i < 8; ++i) {
++    std::cout << std::hex << std::setw(2) << std::setfill('0')
++              << (static_cast<int>(scratch[i]) & 0xFF) << " ";
++  }
++  std::cout << std::endl;
++  */
++  // Readahead
++  // FIX: size threshold
++  // if (zoneFile_->GetExpectedOffset() == offset && n >= 8192) {
++  if (zoneFile_->GetExpectedOffset() == offset) {
++    // start offset : next read offset
++    // std::cout << "[Request Prefetch] " << offset + n << std::endl;
++    zoneFile_->RequestPrefetch(offset + n);
++
++  } else {
++    zoneFile_->SetExpectedOffset(offset + n);
++  }
++  return ret;
+ }
+ 
+ IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
+@@ -1143,6 +1193,173 @@ IOStatus ZoneFile::MigrateData(uint64_t offset, uint32_t length,
+ 
+   return IOStatus::OK();
+ }
++PrefetchBuffer::PrefetchBuffer(size_t buffersize)
++    : valid_(false),
++      inprogress_(false),
++      hit_(false),
++      start_(0),
++      len_(0),
++      buffersize_(buffersize),
++      userdata_(0),
++      expected_offset_(0) {
++  // std::cout << "[Pointer] buffer_ " << buffer_ << ", &Buffer " << &buffer_
++  //<< std::endl;
++  buffer_ = nullptr;
++  // if (posix_memalign((void**)&buffer_, 4096 /* PAGESIZE */, buffersize)) {
++  // LOG("[ERROR]", "MEM Align");
++  //}
++  // std::cout << "[Construction PrefetchBuffer] Thread "
++  //          << std::this_thread::get_id() << " buffer size " << buffersize
++  //          << " buffer pointer" << (void*)buffer_ << std::endl;
++  // " buffer Pointer " << buffer_ << std::endl;
++}
++
++void PrefetchBuffer::GetData(uint64_t start, size_t size, Slice* result,
++                             char* scratch) {
++  uint64_t shift = start - start_;
++  char* ptr;
++  ptr = scratch;
++  // std::cout << "[PrefetchBuffer_GetData] buffer pointer " << (void*)buffer_
++  //<< ", buffer start " << start_ << " req start " << start << ", "
++  //<< size << ", shift " << shift << std::endl;
++  memcpy((char*)ptr, (char*)buffer_ + shift, size);
++  *result = Slice((char*)scratch, size);
++
++  /*
++  std::cout << "Scratch data as hex (8 bytes): (offset : " << start << ") ";
++  for (size_t i = 0; i < 8; ++i) {
++    std::cout << std::hex << std::setw(2) << std::setfill('0')
++              << (static_cast<int>(ptr[i]) & 0xFF) << " ";
++  }
++  std::cout << std::endl;
++  std::cout << "Buffer data as hex (8 bytes): (offset : " << start << ") ";
++  for (size_t i = 0; i < 8; ++i) {
++    std::cout << std::hex << std::setw(2) << std::setfill('0')
++              << (static_cast<int>(buffer_[i + shift]) & 0xFF) << " ";
++  }
++  std::cout << std::endl;
++  */
++}
++
++void ZoneFile::RequestPrefetch(off_t start) {
++  // LOG(GetFilename(), offset);
++  ZenFSMetricsLatencyGuard guard(zbd_->GetMetrics(), ZENFS_READ_LATENCY,
++                                 Env::Default());
++  zbd_->GetMetrics()->ReportQPS(ZENFS_READ_QPS, 1);
++
++  ReadLock lck(this);
++
++  char* ptr;
++  size_t n = prefetch_buffer_->GetBufferSize();
++  uint64_t r_off;
++  size_t r_sz;
++  ZoneExtent* extent;
++  uint64_t extent_end;
++
++  /*
++  if (start >= file_size_) {
++    prefetch_buffer_->Invalidate();
++    return;
++  }
++  */
++
++  r_off = 0;
++  extent = GetExtent(start, &r_off);
++  if (!extent) {
++    /* read start beyond end of (synced) file data*/
++    prefetch_buffer_->Invalidate();
++    return;
++  }
++  extent_end = extent->start_ + extent->length_;
++
++  /* Limit read size to end of file */
++  if ((r_off + n) > extent_end)
++    r_sz = extent_end - r_off;
++  else
++    r_sz = n;
++
++  ptr = prefetch_buffer_->GetBuffer();
++
++  int block_sz = zbd_->GetBlockSize();
++  off_t zOffset = (r_off / block_sz) * block_sz;
++
++  prefetch_buffer_->SetRequestStatus(start, r_sz);
++  zbd_->RequestPrefetch(ptr, r_sz, zOffset, prefetch_buffer_->GetUserData());
++}
++
++/*
++void ZoneFile::RequestPrefetch(off_t start) {
++  if (!prefetch_buffer_->IsInprogress()) {
++    // using aligned offset
++    int block_sz = zbd_->GetBlockSize();
++    off_t zOffset = (start / block_sz) * block_sz;
++    // max. readahead size == buffer size
++    size_t remain_size = file_size_ - zOffset;
++    size_t size = prefetch_buffer_->GetBufferSize() < remain_size
++                      ? prefetch_buffer_->GetBufferSize()
++                      : remain_size;
++
++    // char* buf = prefetch_buffer_->GetBuffer();
++
++    // std::cout << "[ZoneFile::RequestPrefetch] file_id " << file_id_ << ", buf
++    // "
++    //<< (void*)buf << " start " << start << " zOffset " << zOffset
++    //<< " size " << size << std::endl;
++    // store zOffset value
++    prefetch_buffer_->SetRequestStatus(zOffset);
++    char* tmpBuf;
++    if (posix_memalign((void**)&tmpBuf, 4096 , RA_BUFFER_SIZE)) {
++      LOG("[ERROR]", "MEM Align");
++    }
++    zbd_->RequestPrefetch(tmpBuf, size, zOffset,
++                          prefetch_buffer_->GetUserData());
++    // zbd_->RequestPrefetch(prefetch_buffer_->GetBuffer(), size, zOffset,
++    // prefetch_buffer_->GetUserData());
++
++    // temp
++    zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
++    prefetch_buffer_->SetCompletedStatus();
++
++    std::cout << "tmpBuf data as hex (8 bytes): (offset : " << zOffset << ") ";
++    for (size_t i = 0; i < 8; ++i) {
++      std::cout << std::hex << std::setw(2) << std::setfill('0')
++                << (static_cast<int>(tmpBuf[i]) & 0xFF) << " ";
++    }
++    std::cout << std::endl;
++  }
++}
++*/
++
++bool ZoneFile::IsPrefetchBufferAvailable(off_t start, size_t size) {
++  int ret = 0;
++  // std::cout << "[IsPrefetchBufferAvailable] " << start << " " << size
++  //<< std::endl;
++
++  // 1) valid buffer 라면,
++  if (prefetch_buffer_->IsValid() &&
++      prefetch_buffer_->IsDataInBuffer(start, size)) {
++    // std::cout << "[1. Valid Buffer] " << start << ", " << size << std::endl;
++    return true;
++  }
++  // 2) prefeching 중이면 대기
++  else if (prefetch_buffer_->IsInprogress()) {
++    // std::cout << "[2. Inprogress readahead] " << start << ", " << size
++    //<< std::endl;
++    // FIX: Need increment userdata
++    ret = zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
++    if (ret < 0) {
++      LOG("ERR", ret);
++      return false;
++    }
++    prefetch_buffer_->SetCompletedStatus();
++    if (prefetch_buffer_->IsDataInBuffer(start, size)) {
++      return true;
++    }
++  }
++  // 3) prefetch 요청도 없었고, 완료도 안되었으면
++  // std::cout << "[3. NULL] " << start << ", " << size << std::endl;
++  return false;
++}
+ 
+ }  // namespace ROCKSDB_NAMESPACE
+ 
+diff --git a/fs/io_zenfs.h b/fs/io_zenfs.h
+index 76cd328..02a8b6b 100644
+--- a/fs/io_zenfs.h
++++ b/fs/io_zenfs.h
+@@ -8,6 +8,7 @@
+ 
+ #if !defined(ROCKSDB_LITE) && defined(OS_LINUX)
+ 
++#define RA_BUFFER_SIZE 4 * 1024 * 1024  // 2MB
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -28,6 +29,90 @@
+ 
+ namespace ROCKSDB_NAMESPACE {
+ 
++class PrefetchBuffer {
++ private:
++  bool valid_;
++  bool inprogress_;
++  bool hit_;
++  uint64_t start_;
++  size_t len_;
++  size_t buffersize_;
++  char* buffer_;
++  uint32_t userdata_;
++  uint64_t expected_offset_;
++
++ public:
++  PrefetchBuffer() {};
++  PrefetchBuffer(size_t buffersize);
++  //~PrefetchBuffer() { free(buffer_); }
++  void GetData(uint64_t start, size_t size, Slice* result, char* scratch);
++  char* GetBuffer() {
++    if (buffer_ == nullptr) {
++      if (posix_memalign((void**)&buffer_, 4096 /* PAGESIZE */, buffersize_)) {
++        LOG("[ERROR]", "MEM Align");
++      }
++    }
++    // std::cout << "[Buffer pointer] " << (void*)buffer_ << std::endl;
++    return buffer_;
++  }
++  bool IsInprogress() { return inprogress_; }
++  bool IsValid() { return valid_; }
++  size_t GetBufferSize() { return buffersize_; }
++  void Invalidate() {
++    valid_ = false;
++    inprogress_ = false;
++    hit_ = false;
++    start_ = 0;
++    len_ = 0;
++  }
++  void SetRequestStatus(uint64_t start, size_t len) {
++    start_ = start;
++    len_ = len;
++    inprogress_ = true;
++    valid_ = false;
++    // std::cout << "[RequestPrefetch] " << start << ", " << len << std::endl;
++  }
++  void SetCompletedStatus() {
++    inprogress_ = false;
++    valid_ = true;
++    hit_ = true;  // hit: true -> false -> invalid buffer
++    userdata_++;
++    /*
++      std::cout << "End prefetch data as hex (8 bytes): (offset : " << start_
++                << ") ";
++      for (size_t i = 0; i < 8; ++i) {
++        std::cout << std::hex << std::setw(2) << std::setfill('0')
++                  << (static_cast<int>(buffer_[i]) & 0xFF) << " ";
++      }
++      std::cout << std::endl;
++      */
++  }
++  bool IsDataInBuffer(uint64_t start, size_t size) {
++    // std::cout << "[IsDataInBuffer] req start ,size | buffer start, size "
++    //<< start << ", " << size << " | " << start_ << ", " << size_
++    //<< std::endl;
++    //  valid status, double check
++    if (!IsValid()) {
++      return false;
++    }
++
++    if ((start >= start_) && (start + size <= start_ + len_)) {
++      return true;
++    }
++
++    if (hit_) {
++      hit_ = false;
++    } else {
++      valid_ = false;
++    }
++
++    return false;
++  };
++  uint32_t GetUserData() { return userdata_; }
++  uint64_t GetExpectedOffset() { return expected_offset_; }
++  void SetExpectedOffset(uint64_t value) { expected_offset_ = value; }
++};
++
+ class ZoneExtent {
+  public:
+   uint64_t start_;
+@@ -79,8 +164,24 @@ class ZoneFile {
+ 
+   std::mutex writer_mtx_;
+   std::atomic<int> readers_{0};
++  PrefetchBuffer* prefetch_buffer_;
+ 
+  public:
++  void RequestPrefetch(off_t start);
++  bool IsDataInBuffer(off_t start, size_t size);
++  bool IsPrefetchBufferAvailable(off_t start, size_t size);
++  uint64_t GetExpectedOffset() { return prefetch_buffer_->GetExpectedOffset(); }
++  void ReadFromBuffer(off_t start, size_t size, Slice* result, char* scratch) {
++    prefetch_buffer_->GetData(start, size, result, scratch);
++  }
++  void SetExpectedOffset(off_t value) {
++    prefetch_buffer_->SetExpectedOffset(value);
++  }
++  void InvalidateBuffer() {
++    ReadLock lck(this);
++    prefetch_buffer_->Invalidate();
++  }
++
+   static const int SPARSE_HEADER_SIZE = 8;
+ 
+   explicit ZoneFile(ZonedBlockDevice* zbd, uint64_t file_id_,
+@@ -312,9 +413,12 @@ class ZonedRandomAccessFile : public FSRandomAccessFile {
+                 Slice* result, char* scratch,
+                 IODebugContext* dbg) const override;
+ 
+-  IOStatus Prefetch(uint64_t /*offset*/, size_t /*n*/,
++  // IOStatus Prefetch(uint64_t /*offset*/, size_t /*n*/,
++  IOStatus Prefetch(uint64_t /* offset */, size_t /* n */,
+                     const IOOptions& /*options*/,
+                     IODebugContext* /*dbg*/) override {
++    // std::cout << "[Prefetch] offset " << offset << " size " << n <<
++    // std::endl;
+     return IOStatus::OK();
+   }
+ 
+diff --git a/fs/uring_cmd.cc b/fs/uring_cmd.cc
+index fc25d2a..d768f1a 100644
+--- a/fs/uring_cmd.cc
++++ b/fs/uring_cmd.cc
+@@ -3,28 +3,6 @@
+ #include <liburing.h>
+ 
+ std::atomic_int cnt = 0;
+-PrefetchBuffer::PrefetchBuffer(size_t buffersize)
+-    : valid_(false),
+-      inprogress_(false),
+-      hit_(false),
+-      start_(0),
+-      size_(buffersize) {
+-  if (posix_memalign((void **)&buffer_, PAGE_SIZE, buffersize)) {
+-    LOG("[ERROR]", "MEM Align");
+-  }
+-  std::cout << "[Construction PrefetchBuffer] Thread "
+-            << std::this_thread::get_id() << " buffer size " << buffersize
+-            << " buffer Reference " << &buffer_ << " buffer Pointer " << buffer_
+-            << std::endl;
+-  LOG("init prefetch buffer", buffersize);
+-  LOG("buffer offset", &buffer_);
+-}
+-
+-void PrefetchBuffer::GetData(off_t start, size_t size, void *buf) {
+-  uint64_t shift = start - start_;
+-  memcpy((char *)buf, (char *)buffer_ + shift, size);
+-}
+-
+ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
+                    io_uring_params params)
+     : qd_(qd),
+@@ -33,8 +11,8 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
+       req_limitmax_(qd),
+       req_limitlow_(qd >> 1),
+       req_inflight_(0),
+-      expected_offset_(-1),
+-      max_trf_size_(blocksize * 64) {
++      max_trf_size_(blocksize * 64),
++      ra_nr_reqs_(0) {
+   req_id_ = 0;
+   // LOG("Uring Construction", std::this_thread::get_id());
+   // initBuffer();
+@@ -64,12 +42,6 @@ void UringCmd::initUring(io_uring_params &params) {
+   if (posix_memalign((void **)&readbuf_, PAGE_SIZE, max_trf_size_ * qd_)) {
+     LOG("[ERROR]", "MEM Align");
+   }
+-  LOG("Readbuff", readbuf_);
+-
+-  // init prefetch buffer
+-  // prefetch_buffer_ = PrefetchBuffer(max_trf_size_ * qd_);
+-  prefetch_buffer_ = PrefetchBuffer(max_trf_size_ * 8);
+-  LOG(max_trf_size_, qd_);
+ 
+   // 모든 멤버가 0으로 초기화된 io_uring_params 구조체를 생성
+   io_uring_params empty_params;
+@@ -109,9 +81,9 @@ void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
+   // iovec.iov_base = buf;
+   // iovec.iov_len = size;
+   // std::cout << "[PrepUringCmd] IsRead " << is_read << " Thread "
+-  //          << std::this_thread::get_id() << " ring " << &ring_ << " offset "
+-  //          << offset << " size " << size << " buffer offset " << buf
+-  //          << std::endl;
++  //<< std::this_thread::get_id() << " ring " << &ring_ << " offset "
++  //<< offset << " size " << size << " buffer offset " << buf
++  //<< std::endl;
+   if (sqe == NULL) {
+     LOG("ERROR", "sqe is null");
+   }
+@@ -245,18 +217,6 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
+ 
+   // std::cout << "[uringCmdRead] Thread " << std::this_thread::get_id()
+   //           << " offset " << offset << " size " << size << std::endl;
+-  if (false) {
+-    if (IsPrefetchBufferAvailable(offset, size)) {
+-      prefetch_buffer_.GetData(offset, size, &buf);
+-      LOG("Buffer Hit", offset);
+-      expected_offset_ = offset + size;
+-      // LOG("Expected offset", expected_offset_);
+-      return size;
+-    } else {
+-      prefetch_buffer_.Invalidate();
+-    }
+-  }
+-
+   // INFO: 너무 긴 경우(>8MB, QD32) 예외처리
+   if (size > max_trf_size_ * (qd_ - 1)) {  // 256KB
+     // if (size > maxTfrbytes * qd_) {  // 64KB
+@@ -275,7 +235,7 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
+     if (use_tempbuffer) {
+       prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)readbuf_ + nRead,
+                    loop);
+-      //  LOG("Use Readbuf", size);
++      LOG("Use Readbuf", size);
+     } else {
+       prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)buf + nRead,
+                    loop);
+@@ -302,21 +262,19 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
+     memcpy((char *)buf, (char *)readbuf_ + misOffset, size);
+   }
+ 
+-  // need prefetch
+-
+-  if (expected_offset_ == offset && size >= max_trf_size_) {
+-    // requestPrefetch(fd, ns, zOffset);  // start offset : next read offset
+-    LOG(offset, size);
+-  } else {
+-    expected_offset_ = offset + size;
+-  }
+-
+   // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size
+   // "
+   //           << size << std::endl;
+   //    TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
+   //    return nRead;
+ 
++  // std::cout << "Read data as hex (8 bytes): ";
++  // for (size_t i = 0; i < 8; ++i) {
++  // std::cout << std::hex << std::setw(2) << std::setfill('0')
++  //<< (static_cast<int>(((char *)buf)[i]) & 0xFF) << " ";
++  //}
++  // std::cout << std::endl;
++
+   return size;
+ }
+ 
+@@ -342,9 +300,6 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
+     return -EINVAL;
+   }
+ 
+-  if (prefetch_buffer_.IsValid()) {
+-    prefetch_buffer_.Invalidate();
+-  }
+   while (left > 0) {
+     loop++;
+     uint32_t nCurSize = ((uint32_t)left > maxTfrbytes) ? maxTfrbytes : left;
+@@ -442,82 +397,88 @@ int UringCmd::uringFsync(int fd, int ns) {
+   return ret;
+ }
+ 
+-void UringCmd::requestPrefetch(int fd, int ns, off_t start) {
+-  if (!prefetch_buffer_.IsInprogress()) {
+-    prefetch_buffer_.SetRequestStatus(start);
+-    LOG("Request Prefetch", start);
+-
+-    off_t curOffset = start;
+-    size_t left = prefetch_buffer_.GetBufferSize();
++int UringCmd::uringRequestPrefetch(int fd, int ns, off_t offset, size_t size,
++                                   void *buf, uint64_t userdata) {
++  off_t curOffset = offset;
++  int left = size;
++  size_t nRead = 0;
++  int nloop = 0;
++  // std::cout << "[uringRequestPrefetch] " << offset << ", " << size << ", "
++  //<< userdata << ", Buffer reference " << &buf << ", Buffer Pointer "
++  //<< buf << std::endl;
+ 
+-    size_t nRead = 0;
+-    void *buffer;
+-    prefetch_buffer_.GetBuffer(buffer);
+-    // int ret = 0;
++  /*
++  std::cout << "[Buffer Pointer - uring] " << (void *)buf << std::endl;
++  std::cout << "before-Buffer data as hex (8 bytes): ";
++  for (size_t i = 0; i < 8; ++i) {
++    std::cout << std::hex << std::setw(2) << std::setfill('0')
++              << (static_cast<int>(((char *)buf)[i]) & 0xFF) << " ";
++  }
++  std::cout << std::endl;
++  */
++  while (left > 0) {
++    uint32_t nCurSize = ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
++    nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
++    // std::cout << "nCurSize " << nCurSize << " left " << left << std::endl;
+ 
+-    // LOG("Buffer Pointer in requestPrefetch", buffer);
+-    // LOG("Buffer Reference in requestPrefetch", &buffer);
+-    /*
+-    void *cmpBuf;
+-    if (posix_memalign((void **)&cmpBuf, PAGE_SIZE, left)) {
+-      LOG("Error", cmpBuf);
+-    }
+-    */
++    prepUringCmd(fd, ns, op_read, curOffset, nCurSize, (char *)buf + nRead,
++                 userdata + nloop);
+ 
+-    while (left > 0) {
+-      uint32_t nCurSize =
+-          ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
+-      nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
++    left -= nCurSize;
++    curOffset += nCurSize;
++    nRead += nCurSize;
++    nloop++;
++  }
++  ra_nr_reqs_ = nloop;
+ 
+-      prepUringCmd(fd, ns, op_read, curOffset, nCurSize,
+-                   (char *)buffer + nRead);
++  return submitCommand();
++}
+ 
+-      // LOG("Submit Command Return", ret);
+-      // ret = waitCompleted();
+-      // if (ret < 0) {
+-      //  LOG("ERR", ret);
+-      // }
+-      left -= nCurSize;
+-      curOffset += nCurSize;
+-      nRead += nCurSize;
+-    }
++int UringCmd::uringWaitPrefetch(uint64_t userdata) {
++  (void)userdata;
++  int err;
++  // std::cout << "[UringCmd::uringWaitPrefetch] nr_reqs " << ra_nr_reqs_
++  //<< " userdata " << userdata << " size " << size << " "
++  //<< max_trf_size_ << std::endl;
+ 
+-    submitCommand();
+-    // int nr_cqes = prefetch_buffer_.GetBufferSize() / max_trf_size_;
+-    // LOG("Waiting", nr_cqes);
+-    // ret = waitCompleted(nr_cqes);
+-    // if (ret < 0) {
+-    //   LOG("ERR", ret);
+-    // }
+-    // memcpy(&buffer, cmpBuf, nRead);
+-    // free(cmpBuf);
+-  }
+-  // prefetch_buffer_.SetCompletedStatus();
+-  // LOG("Prefetching..", "");
+-}
++  struct io_uring_cqe *cqe = NULL;
+ 
+-bool UringCmd::IsPrefetchBufferAvailable(off_t start, size_t size) {
+-  int ret = 0;
+-  // std::cout << "[IsPrefetchBufferAvailable] " << start << " " << size
+-  //<< std::endl;
+-  //  valid buffer 라면,
+-  if (prefetch_buffer_.IsValid() &&
+-      prefetch_buffer_.IsDataInBuffer(start, size)) {
+-    return true;
+-  }
+-  // prefeching 중이면 대기
+-  else if (prefetch_buffer_.IsInprogress()) {
+-    int nr_cqes = prefetch_buffer_.GetBufferSize() / max_trf_size_;
+-    ret = waitCompleted(nr_cqes);
+-    if (ret < 0) {
+-      LOG("ERR", ret);
+-      return false;
++  if (ra_nr_reqs_ > 1) {
++    // INFO: get cqe from userspace
++    for (int i = 0; i < ra_nr_reqs_; i++) {
++      err = io_uring_wait_cqe(&ring_, &cqe);
++      // std::cout << "[WaitCompleted] Thread " << std::this_thread::get_id()
++      //<< " " << i << " cqd->res " << cqe->res << " ret " << err
++      //<< std::endl;
++      if (err != 0) {
++        LOG("uring_wait_cqe", err);
++        io_uring_cqe_seen(&ring_, cqe);
++        return cqe->res;
++      }
++      /*
++      std::cout << "[uringWaitPrefetch] usrdata expct: " << userdata + i
++                << ", real value: " << cqe->user_data << std::endl;
++      if (cqe->user_data != userdata + i) {
++        // std::cout << "[uringWaitPrefetch] usrdata expct: " << userdata + i
++        //           << ", real value: " << cqe->user_data << std::endl;
++        err = -EIO;
++      }
++      */
++      //   std::cout << "user_data(real, exp) " << cqe->user_data << ", " <<
++      //   userdata
++      //             << std::endl;
++      io_uring_cqe_seen(&ring_, cqe);
+     }
+-    prefetch_buffer_.SetCompletedStatus();
+-    if (prefetch_buffer_.IsDataInBuffer(start, size)) {
+-      return true;
++  } else {
++    err = io_uring_wait_cqe(&ring_, &cqe);
++    // std::cout << "[WaitCompleted] Thread " << std::this_thread::get_id()
++    //<< " cqe->res " << cqe->res << " ret " << err << std::endl;
++    if (err != 0) {
++      LOG("uring_wait_cqe", err);
+     }
++    io_uring_cqe_seen(&ring_, cqe);
+   }
+-  //  prefetch 요청도 없었고, 완료도 안되었으면
+-  return false;
++
++  // LOG("[uringWaitPrefetch] err", err);
++  return err;
+ }
+diff --git a/fs/uring_cmd.h b/fs/uring_cmd.h
+index 359b49e..e110d4d 100644
+--- a/fs/uring_cmd.h
++++ b/fs/uring_cmd.h
+@@ -23,63 +23,6 @@ enum nvme_io_opcode {
+   nvme_cmd_io_mgmt_send = 0x1d,
+ };
+ 
+-class PrefetchBuffer {
+- private:
+-  bool valid_;
+-  bool inprogress_;
+-  bool hit_;
+-  off_t start_;
+-  size_t size_;
+-  void *buffer_;
+-
+- public:
+-  PrefetchBuffer() {};
+-  PrefetchBuffer(size_t buffersize);
+-  //~PrefetchBuffer() { free(buffer_); }
+-  void GetData(off_t start, size_t size, void *buf);
+-  void GetBuffer(void *&buffer) { buffer = buffer_; }
+-  bool IsInprogress() { return inprogress_; }
+-  bool IsValid() { return valid_; }
+-  size_t GetBufferSize() { return size_; }
+-  void Invalidate() {
+-    valid_ = false;
+-    inprogress_ = false;
+-    hit_ = false;
+-    LOG("Invalidate", start_);
+-  }
+-  void SetRequestStatus(off_t start) {
+-    start_ = start;
+-    inprogress_ = true;
+-    valid_ = false;
+-  }
+-  void SetCompletedStatus() {
+-    inprogress_ = false;
+-    valid_ = true;
+-    hit_ = true;  // hit: true -> false -> invalid buffer
+-  }
+-  bool IsDataInBuffer(off_t start, size_t size) {
+-    std::cout << "[IsDataInBuffer] req start ,size | buffer start, size "
+-              << start << ", " << size << " | " << start_ << ", " << size_
+-              << std::endl;
+-    //  valid status, double check
+-    if (!IsValid()) {
+-      return false;
+-    }
+-
+-    if ((start >= start_) && (start + size <= start_ + size_)) {
+-      return true;
+-    }
+-
+-    if (hit_) {
+-      hit_ = false;
+-    } else {
+-      valid_ = false;
+-    }
+-
+-    return false;
+-  };
+-};
+-
+ class UringCmd {
+  private:
+   uint32_t qd_;
+@@ -97,10 +40,9 @@ class UringCmd {
+   unsigned int req_id_;
+   std::mutex mutex_;
+ 
+-  off_t expected_offset_;
+   size_t max_trf_size_;
+   void *readbuf_;
+-  PrefetchBuffer prefetch_buffer_;
++  int ra_nr_reqs_;
+ 
+   void initBuffer();
+   void initUring(io_uring_params &params);
+@@ -109,10 +51,6 @@ class UringCmd {
+                     uint32_t dspec = 0);
+   void prepUring(int fd, bool is_read, off_t offset, size_t size, void *buf);
+ 
+-  void requestPrefetch(int fd, int ns, off_t start);
+-  bool IsDataInBuffer(off_t start, size_t size);
+-  bool IsPrefetchBufferAvailable(off_t start, size_t size);
+-
+  public:
+   UringCmd() {};
+   UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
+@@ -145,6 +83,10 @@ class UringCmd {
+   int uringCmdRead(int fd, int ns, off_t offset, size_t size, void *buf);
+   int uringCmdWrite(int fd, int ns, off_t offset, size_t size, void *buf,
+                     uint32_t dspec);
++
++  int uringRequestPrefetch(int fd, int ns, off_t offset, size_t size, void *buf,
++                           uint64_t userdata);
++  int uringWaitPrefetch(uint64_t userdata);
+   int uringFsync(int fd, int ns);
+ 
+   // INFO:
+diff --git a/fs/uringlib_zenfs.cc b/fs/uringlib_zenfs.cc
+index 7a6dd15..951730c 100644
+--- a/fs/uringlib_zenfs.cc
++++ b/fs/uringlib_zenfs.cc
+@@ -244,6 +244,29 @@ int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
+   return 0;
+ }
+ 
++int UringlibBackend::RequestPrefetch(char *buf, int size, uint64_t pos,
++                                     uint64_t userdata) {
++  //(void)userdata;
++  // std::cout << "[UringlibBackend::RequestPrefetch] buffer pointer "
++  //<< (void *)buf << " size " << size << std::endl;
++  if (!isUringCmdInitialized()) {
++    initializeUringCmd();
++  }
++  return uringCmd_->uringRequestPrefetch(
++      read_direct_f_, fdp_.getNvmeData().nsId(), pos, size, buf, userdata);
++  // return uringCmd_->uringCmdRead(read_f_, fdp_.getNvmeData().nsId(), pos,
++  // size, buf);
++}
++
++int UringlibBackend::WaitPrefetch(uint64_t userdata) {
++  //(void)userdata;
++  // return 0;
++  if (!isUringCmdInitialized()) {
++    return -1;
++  }
++  return uringCmd_->uringWaitPrefetch(userdata);
++}
++
+ int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
+   if (!isUringCmdInitialized()) {
+     initializeUringCmd();
+diff --git a/fs/uringlib_zenfs.h b/fs/uringlib_zenfs.h
+index 602f558..5471dd5 100644
+--- a/fs/uringlib_zenfs.h
++++ b/fs/uringlib_zenfs.h
+@@ -54,6 +54,8 @@ class UringlibBackend : public ZonedBlockDeviceBackend {
+   int Read(char *buf, int size, uint64_t pos, bool direct);
+   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
+   int InvalidateCache(uint64_t pos, uint64_t size);
++  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata);
++  int WaitPrefetch(uint64_t userdata);
+ 
+   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx) {
+     struct zbd_zone *z = &((struct zbd_zone *)zones->GetData())[idx];
+diff --git a/fs/zbd_zenfs.cc b/fs/zbd_zenfs.cc
+index 632c05f..9a2de61 100644
+--- a/fs/zbd_zenfs.cc
++++ b/fs/zbd_zenfs.cc
+@@ -405,6 +405,7 @@ ZonedBlockDevice::~ZonedBlockDevice() {
+   for (const auto z : io_zones) {
+     delete z;
+   }
++  std::cout << "[Hit, Miss] " << hitCounter << ", " << missCounter << std::endl;
+ }
+ 
+ #define LIFETIME_DIFF_NOT_GOOD (100)
+diff --git a/fs/zbd_zenfs.h b/fs/zbd_zenfs.h
+index 96cf18f..cfd25a0 100644
+--- a/fs/zbd_zenfs.h
++++ b/fs/zbd_zenfs.h
+@@ -18,9 +18,11 @@
+ 
+ #include <atomic>
+ #include <condition_variable>
++#include <iostream>
+ #include <mutex>
+ #include <sstream>
+ #include <string>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -28,7 +30,6 @@
+ #include "rocksdb/env.h"
+ #include "rocksdb/file_system.h"
+ #include "rocksdb/io_status.h"
+-
+ namespace ROCKSDB_NAMESPACE {
+ 
+ class ZonedBlockDevice;
+@@ -43,7 +44,7 @@ class ZoneList {
+ 
+  public:
+   ZoneList(void *data, unsigned int zone_count)
+-      : data_(data), zone_count_(zone_count){};
++      : data_(data), zone_count_(zone_count) {};
+   void *GetData() { return data_; };
+   unsigned int ZoneCount() { return zone_count_; };
+   ~ZoneList() { free(data_); };
+@@ -133,7 +134,10 @@ class ZonedBlockDeviceBackend {
+   uint32_t GetBlockSize() { return block_sz_; };
+   uint64_t GetZoneSize() { return zone_sz_; };
+   uint32_t GetNrZones() { return nr_zones_; };
+-  virtual ~ZonedBlockDeviceBackend(){};
++  virtual int RequestPrefetch(char *buf, int size, uint64_t pos,
++                              uint64_t userdata) = 0;
++  virtual int WaitPrefetch(uint64_t userdata) = 0;
++  virtual ~ZonedBlockDeviceBackend() {};
+ };
+ 
+ enum class ZbdBackendType {
+@@ -180,6 +184,8 @@ class ZonedBlockDevice {
+   std::atomic<uint64_t> written_header_{0};
+   std::atomic<uint64_t> written_data_{0};
+   std::atomic<uint64_t> append_data_{0};
++  std::atomic<int> hitCounter{0};
++  std::atomic<int> missCounter{0};
+ 
+   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
+                             std::shared_ptr<Logger> logger,
+@@ -247,6 +253,12 @@ class ZonedBlockDevice {
+ 
+   ZbdBackendType GetBackendType() { return zbd_be_type_; }
+   void SetWritePointer(std::vector<uint64_t> wps);
++  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata) {
++    return zbd_be_->RequestPrefetch(buf, size, pos, userdata);
++  };
++  int WaitPrefetch(uint64_t userdata) {
++    return zbd_be_->WaitPrefetch(userdata);
++  };
+ 
+  private:
+   IOStatus GetZoneDeferredStatus();
+diff --git a/fs/zbdlib_zenfs.h b/fs/zbdlib_zenfs.h
+index 61c1a1f..e5c3598 100644
+--- a/fs/zbdlib_zenfs.h
++++ b/fs/zbdlib_zenfs.h
+@@ -43,6 +43,18 @@ class ZbdlibBackend : public ZonedBlockDeviceBackend {
+   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
+   int InvalidateCache(uint64_t pos, uint64_t size);
+ 
++  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata) {
++    (void)buf;
++    (void)size;
++    (void)pos;
++    (void)userdata;
++    return 0;
++  };
++  int WaitPrefetch(uint64_t userdata) {
++    (void)userdata;
++    return 0;
++  };
++
+   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx) {
+     struct zbd_zone *z = &((struct zbd_zone *)zones->GetData())[idx];
+     return zbd_zone_type(z) == ZBD_ZONE_TYPE_SWR;
+diff --git a/fs/zonefs_zenfs.h b/fs/zonefs_zenfs.h
+index eb7bec6..53fe132 100644
+--- a/fs/zonefs_zenfs.h
++++ b/fs/zonefs_zenfs.h
+@@ -79,6 +79,17 @@ class ZoneFsBackend : public ZonedBlockDeviceBackend {
+   int Write(char *data, uint32_t size, uint64_t pos, uint32_t whint = 0);
+   int InvalidateCache(uint64_t pos, uint64_t size);
+ 
++  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata) {
++    (void)buf;
++    (void)size;
++    (void)pos;
++    (void)userdata;
++    return 0;
++  };
++  int WaitPrefetch(uint64_t userdata) {
++    (void)userdata;
++    return 0;
++  };
+   bool ZoneIsSwr(std::unique_ptr<ZoneList> &zones, unsigned int idx);
+   bool ZoneIsOffline(std::unique_ptr<ZoneList> &zones, unsigned int idx);
+   bool ZoneIsWritable(std::unique_ptr<ZoneList> &zones, unsigned int idx);
+-- 
+2.34.1
+
+

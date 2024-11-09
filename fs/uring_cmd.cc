@@ -10,8 +10,8 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
       lbashift_(lbashift),
       req_limitmax_(qd),
       req_limitlow_(qd >> 1),
-      req_inflight_(0) {
-  req_id_ = 0;
+      req_inflight_(0),
+      max_trf_size_(blocksize * 64) {
   // LOG("Uring Construction", std::this_thread::get_id());
   initBuffer();
   initUring(params);
@@ -37,7 +37,7 @@ void UringCmd::initBuffer() {
 }
 
 void UringCmd::initUring(io_uring_params &params) {
-  if (posix_memalign((void **)&readbuf_, PAGE_SIZE, MAX_TRF_SIZE * qd_)) {
+  if (posix_memalign((void **)&readbuf_, PAGE_SIZE, max_trf_size_ * qd_)) {
     LOG("Mem align Fail", "initUring");
   }
   // 모든 멤버가 0으로 초기화된 io_uring_params 구조체를 생성
@@ -77,8 +77,9 @@ void UringCmd::prepUringCmd(int fd, int ns, bool is_read, off_t offset,
   // struct iovec iovec;
   // iovec.iov_base = buf;
   // iovec.iov_len = size;
-  if (sqe == NULL) {
+  if (!sqe) {
     LOG("ERROR", "sqe is null");
+    return;
   }
   memset(sqe, 0, sizeof(*sqe));
 
@@ -194,33 +195,40 @@ int UringCmd::uringWrite(int fd, off_t offset, size_t size, void *buf) {
 int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
                            void *buf) {
   int ret;
-  // zero-based offset(aligned)
+  //  zero-based offset(aligned)
   off_t zOffset = (offset / blocksize_) * blocksize_;
   off_t misOffset = offset - zOffset;
   off_t lastOffset = offset + size - 1;
   int32_t left = lastOffset - zOffset + 1;
   uint32_t nRead = 0;
+  uint64_t userdata = offset + size;
   int loop = 0;
+  bool use_tempbuffer = (misOffset > 0) || (size < 4096);
 
   // INFO: 너무 긴 경우(>8MB, QD32) 예외처리
-  if (size > MAX_TRF_SIZE * (qd_ - 1)) {  // 256KB
+  if (size > max_trf_size_ * (qd_ - 1)) {  // 256KB
     // if (size > maxTfrbytes * qd_) {  // 64KB
-    LOG("over max buffersize", MAX_TRF_SIZE * (qd_ - 1));
+    LOG("over max buffersize", max_trf_size_ * (qd_ - 1));
 
     std::cout << "offset " << offset << " size " << size << std::endl;
     return -EINVAL;
   }
 
-  memset(readbuf_, 0, MAX_TRF_SIZE * qd_);
+  memset(readbuf_, 0, max_trf_size_ * qd_);
 
   while (left > 0) {
     loop++;
-    uint32_t nCurSize = ((uint32_t)left > MAX_TRF_SIZE) ? MAX_TRF_SIZE : left;
+    uint32_t nCurSize = ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
     nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
 
-    // LOG(zOffset, nCurSize);
-    prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)readbuf_ + nRead,
-                 loop);
+    if (use_tempbuffer) {
+      prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)readbuf_ + nRead,
+                   userdata);
+      // LOG("Use Readbuf", size);
+    } else {
+      prepUringCmd(fd, ns, op_read, zOffset, nCurSize, (char *)buf + nRead,
+                   userdata);
+    }
 
     /*
     submitCommand();
@@ -235,11 +243,14 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   }
   // TODO: Batch I/O 분석 필요
   submitCommand();
-  ret = waitCompleted(loop);
+  addRequest(userdata, loop);
+  ret = waitTargetCompleted(userdata);
   if (ret < 0) {
     LOG("ERR", ret);
   }
-  memcpy((char *)buf, (char *)readbuf_ + misOffset, size);
+  if (use_tempbuffer) {
+    memcpy((char *)buf, (char *)readbuf_ + misOffset, size);
+  }
 
   // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size
   // "
@@ -263,6 +274,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   off_t lastOffset = offset + size - 1;
   int32_t left = lastOffset - zOffset + 1;
   uint32_t nWritten = 0;
+  uint64_t userdata = (offset + size);
+  userdata |= (1ULL << 63);  // write flag
   int loop = 0;
 
   //   INFO: 너무 긴 경우(>8MB) 예외처리
@@ -281,8 +294,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
 
     } else {
       prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
-                   loop, kPlacementMode, dspec);
-      // submitCommand();
+                   userdata, kPlacementMode, dspec);
+      //  submitCommand();
       // ret = waitCompleted();
     }
     /*
@@ -310,16 +323,17 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     // INFO: misOffset은 처음 한번만 반영
     misOffset = 0;
   }
+  // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
+  //<< size << " nloop " << loop << " userdata " << userdata
+  //<< std::endl;
   // TODO: Batch I/O 분석 필요
   submitCommand();
-  ret = waitCompleted(loop);
+  addRequest(userdata, loop);
+  ret = waitTargetCompleted(userdata);
   if (ret < 0) {
     LOG("ERR", ret);
   }
   //
-  // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size
-  // "
-  //           << size << std::endl;
   return nWritten;
 }
 int UringCmd::isCqOverflow() { return io_uring_cq_has_overflow(&ring_); }
@@ -366,4 +380,107 @@ int UringCmd::uringFsync(int fd, int ns) {
   LOG("COMPLETED", "NVMe Flush");
 
   return ret;
+}
+
+int UringCmd::uringRequestPrefetch(int fd, int ns, off_t offset, size_t size,
+                                   void *buf, uint64_t userdata) {
+  off_t curOffset = offset;
+  int left = size;
+  size_t nRead = 0;
+  int nloop = 0;
+  // std::cout << "[uringRequestPrefetch] " << offset << ", " << size << ", "
+  //<< userdata << std::endl;
+  while (left > 0) {
+    nloop++;
+    uint32_t nCurSize = ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
+    nCurSize = (((nCurSize - 1) / blocksize_) + 1) * blocksize_;
+    prepUringCmd(fd, ns, op_read, curOffset, nCurSize, (char *)buf + nRead,
+                 userdata);
+    left -= nCurSize;
+    curOffset += nCurSize;
+    nRead += nCurSize;
+  }
+  // update RA requests counts
+  addRequest(userdata, nloop);
+
+  return submitCommand();
+}
+
+int UringCmd::uringWaitPrefetch(uint64_t userdata) {
+  // std::cout << "[waitPrefetch] " << userdata << ", counts " << counts
+  //<< std::endl;
+  waitTargetCompleted(userdata);
+  return 0;
+}
+
+int UringCmd::waitTargetCompleted(uint64_t userdata) {
+  struct io_uring_cqe *cqe = NULL;
+  //  int err = 0;
+  // int maxloop = 32;
+
+  int *requested_ptr = nullptr;
+  if (!getNrRequested(userdata, requested_ptr)) {
+    // FIX: Need to debug
+    // std::cout << "can't find requested map " << userdata << std::endl;
+    return 0;
+  }
+
+  while (*requested_ptr) {
+    if ((io_uring_peek_cqe(&ring_, &cqe) == 0)) {
+      decrementRequest(io_uring_cqe_get_data64(cqe));
+      io_uring_cqe_seen(&ring_, cqe);
+    }
+  }
+
+  return deleteRequest(userdata);
+
+  /* cqe foreach
+  unsigned head;
+
+  io_uring_for_each_cqe(&ring_, head, cqe) {
+    if (io_uring_cqe_get_data64(cqe) == userdata) {
+      // std::cout << "Processing target userdata: " << userdata << std::endl;
+      io_uring_cqe_seen(&ring_, cqe);
+      counts--;
+    } else {
+      std::cout << "Skipping , Count " << counts << " cqe-data "
+                << io_uring_cqe_get_data64(cqe) << " userdata: " << userdata
+                << std::endl;
+    }
+
+    // CQE를 완료 처리
+  }
+
+  return 0;
+  */
+
+  /*
+  while (io_uring_peek_cqe(&ring_, &cqe) == 0) {
+    if (cqe->user_data == user_data) {
+      std::cout << "nloop " << counts << " maxloop " << maxloop << " cqe-data "
+                << cqe->user_data << " userdata " << user_data << std::endl;
+      if (cqe->res >= 0) {
+        // std::cout << "Request with user_data " << user_data
+        //<< " completed successfully.\n";
+      } else {
+        std::cout << "Request with user_data " << user_data
+                  << " failed with error: " << -cqe->res << "\n";
+      }
+      io_uring_cqe_seen(&ring_, cqe);
+      // Decrease counts
+      counts--;
+    } else {
+      std::cout << "counts " << counts << " maxloop " << maxloop << " cqe-data "
+                << cqe->user_data << " userdata " << user_data << std::endl;
+      maxloop--;
+      if (maxloop < 0) {
+        counts = 0;
+        break;
+      }
+      //   usleep(100);
+      continue;
+    }
+  }
+  return 0;
+*/
 }

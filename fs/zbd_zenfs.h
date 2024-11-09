@@ -18,9 +18,11 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -134,6 +136,9 @@ class ZonedBlockDeviceBackend {
   uint32_t GetBlockSize() { return block_sz_; };
   uint64_t GetZoneSize() { return zone_sz_; };
   uint32_t GetNrZones() { return nr_zones_; };
+  virtual int RequestPrefetch(char *buf, int size, uint64_t pos,
+                              uint64_t userdata) = 0;
+  virtual int WaitPrefetch(uint64_t userdata) = 0;
   virtual ~ZonedBlockDeviceBackend() {};
 };
 
@@ -181,6 +186,8 @@ class ZonedBlockDevice {
   std::atomic<uint64_t> written_header_{0};
   std::atomic<uint64_t> written_data_{0};
   std::atomic<uint64_t> append_data_{0};
+  std::atomic<int> hitCounter{0};
+  std::atomic<int> missCounter{0};
 
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
@@ -248,6 +255,12 @@ class ZonedBlockDevice {
 
   ZbdBackendType GetBackendType() { return zbd_be_type_; }
   void SetWritePointer(std::vector<uint64_t> wps);
+  int RequestPrefetch(char *buf, int size, uint64_t pos, uint64_t userdata) {
+    return zbd_be_->RequestPrefetch(buf, size, pos, userdata);
+  };
+  int WaitPrefetch(uint64_t userdata) {
+    return zbd_be_->WaitPrefetch(userdata);
+  };
   IOStatus Delete(uint64_t start, uint64_t size) {
     return zbd_be_->Delete(start, size);
   }
