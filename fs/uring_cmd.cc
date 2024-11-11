@@ -13,7 +13,7 @@ UringCmd::UringCmd(uint32_t qd, uint32_t blocksize, uint32_t lbashift,
       req_inflight_(0),
       max_trf_size_(blocksize * 64) {
   // LOG("Uring Construction", std::this_thread::get_id());
-  initBuffer();
+  // initBuffer();
   initUring(params);
 }
 
@@ -50,6 +50,7 @@ void UringCmd::initUring(io_uring_params &params) {
     memset(&p, 0, sizeof(p));
     p.flags |= IORING_SETUP_SQE128;
     p.flags |= IORING_SETUP_CQE32;
+    //.p.flags |= IORING_SETUP_SQPOLL;
 
     p.flags |= IORING_SETUP_CQSIZE;
     p.cq_entries = qd_ * 2;  // cq size = sq size * 2, to dealwith cq overflow
@@ -214,8 +215,6 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
     return -EINVAL;
   }
 
-  memset(readbuf_, 0, max_trf_size_ * qd_);
-
   while (left > 0) {
     loop++;
     uint32_t nCurSize = ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
@@ -295,14 +294,17 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     } else {
       prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
                    userdata, kPlacementMode, dspec);
-      //  submitCommand();
-      // ret = waitCompleted();
+      /*
+      submitCommand();
+      ret = waitCompleted();
+
+      if (ret < 0) {
+        LOG("ERROR", ret);
+        return ret;
+      }
+      */
     }
     /*
-    if (ret < 0) {
-      LOG("ERROR", ret);
-      return ret;
-    }
 
     void *cmpBuf;
     if (!posix_memalign((void **)&cmpBuf, PAGE_SIZE, nCurSize)) {
@@ -415,21 +417,25 @@ int UringCmd::uringWaitPrefetch(uint64_t userdata) {
 
 int UringCmd::waitTargetCompleted(uint64_t userdata) {
   struct io_uring_cqe *cqe = NULL;
-  //  int err = 0;
-  // int maxloop = 32;
+  unsigned head;
+  //   int err = 0;
+  //  int maxloop = 32;
 
   int *requested_ptr = nullptr;
   if (!getNrRequested(userdata, requested_ptr)) {
-    // FIX: Need to debug
+    //  FIX: Need to debug
     // std::cout << "can't find requested map " << userdata << std::endl;
     return 0;
   }
 
   while (*requested_ptr) {
-    if ((io_uring_peek_cqe(&ring_, &cqe) == 0)) {
-      decrementRequest(io_uring_cqe_get_data64(cqe));
+    io_uring_for_each_cqe(&ring_, head, cqe) {
+      decrementRequest(cqe->user_data);
+      // decrementRequest(io_uring_cqe_get_data64(cqe));
       io_uring_cqe_seen(&ring_, cqe);
     }
+    // if ((io_uring_peek_cqe(&ring_, &cqe) == 0)) {
+    // }
   }
 
   return deleteRequest(userdata);

@@ -503,11 +503,11 @@ IOStatus ZenFS::PersistWritePonter(ZenMetaLog* meta_log) {
 
   std::lock_guard<std::mutex> file_lock(files_mtx_);
   std::lock_guard<std::mutex> metadata_lock(metadata_sync_mtx_);
-  LOG("PersistWritePointer, Metalog Zone WP.", meta_log->GetZone()->wp_);
+  // LOG("PersistWritePointer, Metalog Zone WP.", meta_log->GetZone()->wp_);
   EncodeWritePointerTo(&writePointer);
   // PutFixed32(&writePointer, kEndRecord);
   s = meta_log->AddRecord(writePointer);
-  LOG("Meta WP.", meta_log->GetZone()->wp_);
+  // LOG("Meta WP.", meta_log->GetZone()->wp_);
 
   if (s == IOStatus::NoSpace()) {
     Info(logger_, "Current meta zone full, rolling to next meta zone");
@@ -1528,7 +1528,7 @@ Status ZenFS::RecoverFrom(ZenMetaLog* log) {
     if (!rs.ok()) {
       if (zbd_->GetBackendType() == ZbdBackendType::kFdpDev) {
         // LOG("[Break FDP] Error: not valid record", log->GetReadPosition());
-        LOG("[Recover from] end of record", log->GetReadPosition());
+        // LOG("[Recover from] end of record", log->GetReadPosition());
         break;
       }
       // return Status::OK();
@@ -1604,7 +1604,7 @@ Status ZenFS::RecoverFrom(ZenMetaLog* log) {
         return Status::Corruption("ZenFS", "Unexpected tag");
     }
   }
-  LOG("RecoverDone, Read Pos.", log->GetReadPosition());
+  // LOG("RecoverDone, Read Pos.", log->GetReadPosition());
 
   if (at_least_one_snapshot)
     return Status::OK();
@@ -1720,7 +1720,7 @@ Status ZenFS::Mount(bool readonly) {
   }
 
   Info(logger_, "Recovered from zone: %d", (int)valid_zones[r]->GetZoneNr());
-  LOG("Recovered from zone: %d", (int)valid_zones[r]->GetZoneNr());
+  // LOG("Recovered from zone: %d", (int)valid_zones[r]->GetZoneNr());
   superblock_ = std::move(valid_superblocks[r]);
   zbd_->SetFinishTreshold(superblock_->GetFinishTreshold());
 

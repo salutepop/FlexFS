@@ -5,8 +5,8 @@
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
 
-#include <map>
 #include <mutex>
+#include <unordered_map>
 
 #include "util.h"
 
@@ -42,7 +42,7 @@ class UringCmd {
 
   void *readbuf_;
   size_t max_trf_size_;
-  std::map<uint64_t, int> requestedMap;
+  std::unordered_map<uint64_t, int> requestedMap;
 
   void initBuffer();
   void initUring(io_uring_params &params);
@@ -59,15 +59,18 @@ class UringCmd {
     // LOG("URING_CMD Destruction : Ring", &ring_);
     io_uring_queue_exit(&ring_);
 
-    // iovecs_ 메모리 해제
-    if (iovecs_) {
-      for (int i = 0; i < roundup_pow2(qd_); i++) {
-        if (iovecs_[i].iov_base) {
-          free(iovecs_[i].iov_base);
-        }
-      }
-      free(iovecs_);
+    free(readbuf_);
+    /*
+//  iovecs_ 메모리 해제
+if (iovecs_) {
+  for (int i = 0; i < roundup_pow2(qd_); i++) {
+    if (iovecs_[i].iov_base) {
+      free(iovecs_[i].iov_base);
     }
+  }
+  free(iovecs_);
+}
+    */
     // LOG("Uring Destruction : Threads", std::this_thread::get_id());
   }
   int submitCommand(int nr_reqs = 0);
@@ -94,6 +97,9 @@ class UringCmd {
     auto it = requestedMap.find(userdata);
     if (it != requestedMap.end()) {
       --(it->second);  // Decrement the value
+    } else {
+      std::cout << "Cant't find requested Map, userdata " << userdata
+                << std::endl;
     }
   }
 
@@ -101,6 +107,10 @@ class UringCmd {
   int deleteRequest(uint64_t userdata) {
     auto it = requestedMap.find(userdata);
     if (it != requestedMap.end()) {
+      if (it->second != 0) {
+        std::cout << "Error, mismatch completions, userdata : " << userdata
+                  << " remain requested : " << it->second << std::endl;
+      }
       requestedMap.erase(it);  // Remove the key-value pair
       return 0;                // Indicate successful deletion
     }

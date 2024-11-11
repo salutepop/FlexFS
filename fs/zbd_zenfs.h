@@ -188,6 +188,8 @@ class ZonedBlockDevice {
   std::atomic<uint64_t> append_data_{0};
   std::atomic<int> hitCounter{0};
   std::atomic<int> missCounter{0};
+  std::atomic<int> raCounter{0};
+  std::atomic<int> invalidCounter{0};
 
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
