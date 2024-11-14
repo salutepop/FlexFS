@@ -25,7 +25,7 @@
 #include "rocksdb/io_status.h"
 #include "util.h"
 #include "zbd_zenfs.h"
-#define RA_BUFFER_SIZE 4 * 1024 * 1024  // 2MB
+#define RA_BUFFER_SIZE 2 * 1024 * 1024  // 2MB
 
 namespace ROCKSDB_NAMESPACE {
 

@@ -30,6 +30,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
+#define MERGE_META_ZONES (16)
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -180,6 +181,7 @@ class ZonedBlockDevice {
   void EncodeJsonZone(std::ostream &json_stream,
                       const std::vector<Zone *> zones);
   ZbdBackendType zbd_be_type_;
+  uint64_t start_io_wp_;
 
  public:
   std::atomic<uint64_t> written_meta_{0};
@@ -191,6 +193,7 @@ class ZonedBlockDevice {
   std::atomic<int> raCounter{0};
   std::atomic<int> invalidCounter{0};
 
+  uint64_t GetStartIoWp() { return start_io_wp_; }
   explicit ZonedBlockDevice(std::string path, ZbdBackendType backend,
                             std::shared_ptr<Logger> logger,
                             std::shared_ptr<ZenFSMetrics> metrics =

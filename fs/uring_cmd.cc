@@ -37,7 +37,8 @@ void UringCmd::initBuffer() {
 }
 
 void UringCmd::initUring(io_uring_params &params) {
-  if (posix_memalign((void **)&readbuf_, PAGE_SIZE, max_trf_size_ * qd_)) {
+  // QD 기준, 16MB
+  if (posix_memalign((void **)&readbuf_, PAGE_SIZE, max_trf_size_ * qd_ * 2)) {
     LOG("Mem align Fail", "initUring");
   }
   // 모든 멤버가 0으로 초기화된 io_uring_params 구조체를 생성
@@ -205,16 +206,26 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   uint64_t userdata = offset + size;
   int loop = 0;
   bool use_tempbuffer = (misOffset > 0) || (size < 4096);
+  bool skip_complete = false;
 
   // INFO: 너무 긴 경우(>8MB, QD32) 예외처리
-  if (size > max_trf_size_ * (qd_ - 1)) {  // 256KB
+  if (size > max_trf_size_ * qd_) {  // 256KB
     // if (size > maxTfrbytes * qd_) {  // 64KB
-    LOG("over max buffersize", max_trf_size_ * (qd_ - 1));
+    // LOG("over max buffersize", max_trf_size_ * (qd_ - 1));
 
-    std::cout << "offset " << offset << " size " << size << std::endl;
-    return -EINVAL;
+    if (size > max_trf_size_ * qd_ * 2) {
+      std::cout << "[Error-Read] Too long size (over 8MB), offset " << offset
+                << " size " << size << std::endl;
+      return -EINVAL;
+
+    } else {
+      std::cout << "[Warning-Read] Too long size (over 8MB), offset " << offset
+                << " size " << size << std::endl;
+    }
+    // return -EINVAL;
   }
 
+  // memset(readbuf_, 0, max_trf_size_ * 16);
   while (left > 0) {
     loop++;
     uint32_t nCurSize = ((uint32_t)left > max_trf_size_) ? max_trf_size_ : left;
@@ -239,21 +250,34 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
     left -= nCurSize;
     zOffset += nCurSize;
     nRead += nCurSize;
+    if (loop % qd_ == 0) {
+      skip_complete = true;
+      submitCommand();
+      addRequest(userdata, qd_);
+      ret = waitTargetCompleted(userdata);
+      if (ret < 0) {
+        LOG("ERR", ret);
+      }
+    } else {
+      skip_complete = false;
+    }
   }
   // TODO: Batch I/O 분석 필요
-  submitCommand();
-  addRequest(userdata, loop);
-  ret = waitTargetCompleted(userdata);
-  if (ret < 0) {
-    LOG("ERR", ret);
+  if (!skip_complete) {
+    submitCommand();
+    addRequest(userdata, loop % qd_);
+    ret = waitTargetCompleted(userdata);
+    if (ret < 0) {
+      LOG("ERR", ret);
+    }
   }
+
   if (use_tempbuffer) {
     memcpy((char *)buf, (char *)readbuf_ + misOffset, size);
   }
 
-  // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size
-  // "
-  //           << size << std::endl;
+  // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size "
+  //<< size << std::endl;
   //    TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
   //    return nRead;
   return size;
@@ -276,11 +300,19 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   uint64_t userdata = (offset + size);
   userdata |= (1ULL << 63);  // write flag
   int loop = 0;
+  bool skip_complete = false;
 
   //   INFO: 너무 긴 경우(>8MB) 예외처리
   if (size > maxTfrbytes * qd_) {
     // if (size > maxTfrbytes * qd_) {
-    return -EINVAL;
+    if (size > max_trf_size_ * qd_ * 2) {
+      std::cout << "[Error-Write] Too long size (over 8MB), offset " << offset
+                << " size " << size << std::endl;
+      return -EINVAL;
+    } else {
+      std::cout << "[Warning-Write] Too long size (over 8MB), offset " << offset
+                << " size " << size << std::endl;
+    }
   }
 
   while (left > 0) {
@@ -289,6 +321,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
 
     if (misOffset || nCurSize < blocksize_) {
       // TODO: Mis-aligned 발생 시, data compare 필요, 맨 아래 주석 코드 활용
+      std::cout << "[Warning-Write] Mis-offset and too small size, offset  "
+                << offset << " size " << size << std::endl;
       return -EIO;
 
     } else {
@@ -324,16 +358,29 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     nWritten += nCurSize - misOffset;
     // INFO: misOffset은 처음 한번만 반영
     misOffset = 0;
+    if (loop % qd_ == 0) {
+      skip_complete = true;
+      submitCommand();
+      addRequest(userdata, qd_);
+      ret = waitTargetCompleted(userdata);
+      if (ret < 0) {
+        LOG("ERR", ret);
+      }
+    } else {
+      skip_complete = false;
+    }
   }
   // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
   //<< size << " nloop " << loop << " userdata " << userdata
   //<< std::endl;
   // TODO: Batch I/O 분석 필요
-  submitCommand();
-  addRequest(userdata, loop);
-  ret = waitTargetCompleted(userdata);
-  if (ret < 0) {
-    LOG("ERR", ret);
+  if (!skip_complete) {
+    submitCommand();
+    addRequest(userdata, loop % qd_);
+    ret = waitTargetCompleted(userdata);
+    if (ret < 0) {
+      LOG("ERR", ret);
+    }
   }
   //
   return nWritten;

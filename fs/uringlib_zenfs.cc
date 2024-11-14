@@ -4,9 +4,8 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
+#include "zbd_zenfs.h"
 #if !defined(ROCKSDB_LITE) && !defined(OS_WIN)
-
-#include "uringlib_zenfs.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +19,7 @@
 
 #include "rocksdb/env.h"
 #include "rocksdb/io_status.h"
+#include "uringlib_zenfs.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -113,8 +113,9 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   // zone_sz_ = RU_SIZE / 128;  // 700M GC, 800Mops i/o error
   // zone_sz_ = RU_SIZE / 256;  // 700M GC, 800Mops i/o error
   zone_sz_ = RU_SIZE / 512;  // 700M GC, 800Mops i/o error
-  //  zone_sz_ = RU_SIZE;
-  nr_zones_ = nvmeData.ncap() / (zone_sz_ / block_sz_);
+                             // zone_sz_ = RU_SIZE / 512;
+  nr_zones_ =
+      (nvmeData.ncap() / (zone_sz_ / block_sz_)) - (MERGE_META_ZONES * 3) + 3;
   *max_active_zones = fdp_.getMaxPid() + 1;
   *max_open_zones = fdp_.getMaxPid() + 1;
 
@@ -146,26 +147,33 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
     return nullptr;
   }
 
-  for (int n = 0; n < (int)nr_zones_; n++) {
+  uint64_t start_io_wp = 3 * zone_sz_ * MERGE_META_ZONES;
+  uint64_t nr_meta_zone = 3;
+  for (uint64_t n = 0; n < nr_zones_; n++) {
     // zone.start = (n * zone_sz_) << shift;
     // zone.len = zone_sz_ << shift;
     //  zone.capacity = zone_sz_ << shift;
-    zone.start = (n * zone_sz_);
-    zone.len = zone_sz_;
-    zone.capacity = zone_sz_;
     // if (n == 0) {
-    if (n < 3) {
+    if (n < nr_meta_zone) {
+      zone.start = (n * zone_sz_ * MERGE_META_ZONES);
+      zone.len = zone_sz_ * MERGE_META_ZONES;
+      zone.capacity = zone_sz_ * MERGE_META_ZONES;
+      zone.wp = zone.start;
       // superblock * 2 + spare 1
       // zone.wp = zone.start + block_sz_ * 2;
 
       // end
       // zone.wp = zone.start + zone.len - 1;
       // start
-      zone.wp = zone.start;
     } else {
+      zone.start = start_io_wp + ((n - nr_meta_zone) * zone_sz_);
+      zone.len = zone_sz_;
+      zone.capacity = zone_sz_;
       zone.wp = zone.start;
     }
 
+    // std::cout << " idx, " << n << ", start&wp " << zone.start << ", len "
+    //<< zone.len << std::endl;
     zone.type = ZBD_ZONE_TYPE_SWR;
     zone.cond = ZBD_ZONE_COND_EMPTY;
     zone.flags = 0;
@@ -193,8 +201,15 @@ IOStatus UringlibBackend::Delete(uint64_t start, uint64_t size) {
 IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
                                 uint64_t *max_capacity) {
   // LOG("[Reset-Discard] Zone", start / zone_sz_);
+
+  uint64_t start_io_wp = 3 * zone_sz_ * MERGE_META_ZONES;
   int err;
-  err = uringCmd_->uringDiscard(write_bf_, start, zone_sz_);
+  uint64_t zone_sz = zone_sz_;
+  if (start < start_io_wp) {
+    zone_sz = zone_sz_ * MERGE_META_ZONES;
+  }
+
+  err = uringCmd_->uringDiscard(write_bf_, start, zone_sz);
   // std::cout << "[Discard] Offset : " << start << " Size : " << zone_sz_
   //<< std::endl;
   if (err) {
@@ -222,7 +237,7 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
   }
   */
   *offline = false;
-  *max_capacity = zone_sz_;
+  *max_capacity = zone_sz;
   // unsigned int shift = ilog2(block_sz_);
   //*max_capacity = zone_sz_ << shift;
 

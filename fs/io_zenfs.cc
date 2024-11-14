@@ -1145,14 +1145,14 @@ IOStatus ZonedSequentialFile::PositionedRead(uint64_t offset, size_t n,
                                              IODebugContext* /*dbg*/) {
   IOStatus ret;
   if (zoneFile_->IsPrefetchBufferAvailable(offset, n)) {
-    // zoneFile_->GetZbd()->hitCounter++;
+    zoneFile_->GetZbd()->hitCounter++;
     zoneFile_->ReadFromBuffer(offset, n, result, scratch);
     zoneFile_->SetExpectedOffset(offset + n);
 
     return IOStatus::OK();
   }
 
-  // zoneFile_->GetZbd()->missCounter++;
+  zoneFile_->GetZbd()->missCounter++;
   ret = zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
 
   // Readahead

@@ -63,16 +63,35 @@ Zone::Zone(ZonedBlockDevice *zbd, ZonedBlockDeviceBackend *zbd_be,
   capacity_ = 0;
   if (zbd_be->ZoneIsWritable(zones, idx))
     capacity_ = max_capacity_ - (wp_ - start_);
-  // std::cout << "Real Zone " << idx << " start = " << start_ << " wp_ = " <<
-  // wp_
-  //           << " delta = " << wp_ - start_ << std::endl;
+  // if (idx < 30) {
+  // std::cout << "Construct Zone " << idx << " start = " << start_
+  //<< " wp_ = " << wp_ << " max_capacity " << max_capacity_
+  //<< std::endl;
+  //}
 }
 
 bool Zone::IsUsed() { return (used_capacity_ > 0); }
 uint64_t Zone::GetCapacityLeft() { return capacity_; }
 bool Zone::IsFull() { return (capacity_ == 0); }
 bool Zone::IsEmpty() { return (wp_ == start_); }
-uint64_t Zone::GetZoneNr() { return start_ / zbd_->GetZoneSize(); }
+uint64_t Zone::GetZoneNr() {
+  if (start_ < zbd_->GetStartIoWp()) {
+    // for meta zones
+    // std::cout << "idx " << start_ / (zbd_->GetZoneSize() * MERGE_META_ZONES)
+    //<< " Start " << start_ << " start io wp " << zbd_->GetStartIoWp()
+    //<< std::endl;
+    return start_ / (zbd_->GetZoneSize() * MERGE_META_ZONES);
+  } else {
+    // for io zones
+    // std::cout << "idx "
+    //<< ((start_ - zbd_->GetStartIoWp()) / zbd_->GetZoneSize()) +
+    // ZENFS_META_ZONES
+    //<< " Start " << start_ << " start io wp " << zbd_->GetStartIoWp()
+    //<< std::endl;
+    return ((start_ - zbd_->GetStartIoWp()) / zbd_->GetZoneSize()) +
+           ZENFS_META_ZONES;
+  }
+}
 
 void Zone::EncodeJson(std::ostream &json_stream) {
   json_stream << "{";
@@ -113,7 +132,12 @@ IOStatus Zone::Finish() {
   if (ios != IOStatus::OK()) return ios;
 
   capacity_ = 0;
-  wp_ = start_ + zbd_->GetZoneSize();
+  if (start_ < ZENFS_META_ZONES * MERGE_META_ZONES * zbd_->GetZoneSize()) {
+    wp_ = start_ + zbd_->GetZoneSize() * MERGE_META_ZONES;
+
+  } else {
+    wp_ = start_ + zbd_->GetZoneSize();
+  }
 
   return IOStatus::OK();
 }
@@ -137,9 +161,12 @@ IOStatus Zone::Append(char *data, uint32_t size) {
   uint32_t left = size;
   int ret;
 
-  if (capacity_ < size) LOG("Not Enough capacity, WP: ", wp_);
-  if (capacity_ < size)
+  if (capacity_ < size) {
+    std::cout << "Not enough capacity, wp_ " << wp_ << ", max_cap. "
+              << max_capacity_ << ", capacity " << capacity_ << ", size "
+              << size << std::endl;
     return IOStatus::NoSpace("Not enough capacity for append");
+  }
 
   assert((size % zbd_->GetBlockSize()) == 0);
 
@@ -211,6 +238,7 @@ IOStatus ZonedBlockDevice::Open(bool readonly, bool exclusive) {
                                &max_nr_open_zones);
   if (ios != IOStatus::OK()) return ios;
 
+  start_io_wp_ = GetZoneSize() * ZENFS_META_ZONES * MERGE_META_ZONES;
   if (zbd_be_->GetNrZones() < ZENFS_MIN_ZONES) {
     return IOStatus::NotSupported("To few zones on zoned backend (" +
                                   std::to_string(ZENFS_MIN_ZONES) +
@@ -349,9 +377,9 @@ void ZonedBlockDevice::LogGarbageInfo() {
   // Log zone garbage stats vector.
   //
   // The values in the vector represents how many zones with target garbage
-  // percent. Garbage percent of each index: [0%, <10%, < 20%, ... <100%, 100%]
-  // For example `[100, 1, 2, 3....]` means 100 zones are empty, 1 zone has less
-  // than 10% garbage, 2 zones have  10% ~ 20% garbage ect.
+  // percent. Garbage percent of each index: [0%, <10%, < 20%, ... <100%,
+  // 100%] For example `[100, 1, 2, 3....]` means 100 zones are empty, 1 zone
+  // has less than 10% garbage, 2 zones have  10% ~ 20% garbage ect.
   //
   // We don't need to lock io_zones since we only read data and we don't need
   // the result to be precise.
@@ -995,15 +1023,9 @@ void ZonedBlockDevice::SetWritePointer(std::vector<uint64_t> wps) {
     z->wp_ = wps.at(z->GetZoneNr());
     // z->used_capacity_ = (z->wp_ - z->start_);
     z->capacity_ = z->max_capacity_ - (z->wp_ - z->start_);
-    // std::cout << "Zone : " << z->GetZoneNr() << " WP : " << z->wp_ <<
-    // std::endl;
-    // std::cout << "Zone " << z->GetZoneNr() << " start " << z->start_ << "
-    // wp
-    // "
-    //<< z->wp_ << " used capa(restore) " << z->used_capacity_
-    //<< " used capa(wp-start) " << z->wp_ - z->start_ << " capacity "
-    //<< z->capacity_ << " diff(calc-restore) "
-    //<< z->wp_ - z->start_ - z->used_capacity_ << std::endl;
+    //    std::cout << "Zone " << z->GetZoneNr() << " start " << z->start_ <<
+    //    " wp "
+    //              << z->wp_ << std::endl;
   }
 }
 
