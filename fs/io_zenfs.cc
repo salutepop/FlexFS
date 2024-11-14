@@ -1198,7 +1198,7 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
 
   // Readahead
   // FIX: size threshold
-  if (zoneFile_->GetExpectedOffset() == offset && n >= 8192) {
+  if (zoneFile_->GetExpectedOffset() == offset && n > 8192) {
     // if (zoneFile_->GetExpectedOffset() == offset) {
     //  start offset : next read offset
     //  std::cout << "[Request Prefetch] " << offset + n << std::endl;

@@ -112,8 +112,9 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
   // zone_sz_ = RU_SIZE;  // 500M GC, ?? i/o error
   // zone_sz_ = RU_SIZE / 128;  // 700M GC, 800Mops i/o error
   // zone_sz_ = RU_SIZE / 256;  // 700M GC, 800Mops i/o error
-  zone_sz_ = RU_SIZE / 512;  // 700M GC, 800Mops i/o error
-                             // zone_sz_ = RU_SIZE / 512;
+  // zone_sz_ = RU_SIZE / 512;  // 700M GC, 800Mops i/o error
+  // zone_sz_ = RU_SIZE / 162;  // 77MiB
+  zone_sz_ = RU_SIZE / 192;  // 65MiB
   nr_zones_ =
       (nvmeData.ncap() / (zone_sz_ / block_sz_)) - (MERGE_META_ZONES * 3) + 3;
   *max_active_zones = fdp_.getMaxPid() + 1;

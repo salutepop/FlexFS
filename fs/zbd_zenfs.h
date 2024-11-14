@@ -30,7 +30,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
-#define MERGE_META_ZONES (16)
+#define MERGE_META_ZONES (8)
 
 namespace ROCKSDB_NAMESPACE {
 
