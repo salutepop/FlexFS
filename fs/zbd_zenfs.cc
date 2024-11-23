@@ -477,6 +477,9 @@ IOStatus ZonedBlockDevice::AllocateMetaZone(Zone **out_meta_zone) {
           continue;
         }
         // z->lifetime_ = Env::WLTH_SHORT;
+        std::cout << "[Alloc MetaZone] wp " << z->wp_ << " start " << z->start_
+                  << " max cap " << z->max_capacity_ << " cap " << z->capacity_
+                  << " used cap " << z->used_capacity_ << std::endl;
         *out_meta_zone = z;
         return IOStatus::OK();
       }
@@ -850,53 +853,75 @@ IOStatus ZonedBlockDevice::AllocateIOZone(Env::WriteLifeTimeHint file_lifetime,
         assert(allocated_zone->IsBusy());
         allocated_zone->lifetime_ = file_lifetime;
         switch (file_lifetime) {
-          /* 241026, rocks hint all split, bg thread 4
           case Env::WLTH_NOT_SET:
-            allocated_zone->pid_ = 0;
-            break;
-          case Env::WLTH_NONE:
             allocated_zone->pid_ = 1;
             break;
-          case Env::WLTH_SHORT:
-            allocated_zone->pid_ = 2;  // 0 > 1 change
-            break;
-          case Env::WLTH_MEDIUM:
-            allocated_zone->pid_ = 3;
-            break;
-          case Env::WLTH_LONG:
-            allocated_zone->pid_ = 4;
-            break;
-          case Env::WLTH_EXTREME:
-            allocated_zone->pid_ = 5;
-            break;
-            */
-          case Env::WLTH_NOT_SET:
-            allocated_zone->pid_ = 0;
-            break;
           case Env::WLTH_NONE:
-            allocated_zone->pid_ = 0;
-            break;
-          case Env::WLTH_SHORT:
-            allocated_zone->pid_ = 0;  // 0 > 1 change
-            break;
-          case Env::WLTH_MEDIUM:
-            allocated_zone->pid_ = 1;
-            break;
-          case Env::WLTH_LONG:
             allocated_zone->pid_ = 2;
             break;
-          case Env::WLTH_EXTREME:
-            allocated_zone->pid_ = 3;
+          case Env::WLTH_SHORT:
+            allocated_zone->pid_ = 3;  // 0 > 1 change
             break;
-          case Env::WLTH_EXTREME_2:
+          case Env::WLTH_MEDIUM:
             allocated_zone->pid_ = 4;
             break;
-          case Env::WLTH_EXTREME_3:
+          case Env::WLTH_LONG:
             allocated_zone->pid_ = 5;
             break;
-          case Env::WLTH_EXTREME_4:
+          case Env::WLTH_EXTREME:
             allocated_zone->pid_ = 6;
             break;
+            /* 241026, rocks hint all split, bg thread 4
+            case Env::WLTH_NOT_SET:
+              allocated_zone->pid_ = 0;
+              break;
+            case Env::WLTH_NONE:
+              allocated_zone->pid_ = 1;
+              break;
+            case Env::WLTH_SHORT:
+              allocated_zone->pid_ = 2;  // 0 > 1 change
+              break;
+            case Env::WLTH_MEDIUM:
+              allocated_zone->pid_ = 3;
+              break;
+            case Env::WLTH_LONG:
+              allocated_zone->pid_ = 4;
+              break;
+            case Env::WLTH_EXTREME:
+              allocated_zone->pid_ = 5;
+              break;
+              */
+
+            /* final, split
+            case Env::WLTH_NOT_SET:
+              allocated_zone->pid_ = 0;
+              break;
+            case Env::WLTH_NONE:
+              allocated_zone->pid_ = 0;
+              break;
+            case Env::WLTH_SHORT:
+              allocated_zone->pid_ = 0;  // 0 > 1 change
+              break;
+            case Env::WLTH_MEDIUM:
+              allocated_zone->pid_ = 1;
+              break;
+            case Env::WLTH_LONG:
+              allocated_zone->pid_ = 2;
+              break;
+            case Env::WLTH_EXTREME:
+              allocated_zone->pid_ = 3;
+              break;
+            case Env::WLTH_EXTREME_2:
+              allocated_zone->pid_ = 4;
+              break;
+            case Env::WLTH_EXTREME_3:
+              allocated_zone->pid_ = 5;
+              break;
+            case Env::WLTH_EXTREME_4:
+              allocated_zone->pid_ = 6;
+              break;
+              */
+
             /* delete immediately lv6
           case Env::WLTH_SHORT:
             allocated_zone->pid_ = 0;  // 0 > 1 change

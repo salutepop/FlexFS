@@ -262,12 +262,14 @@ void ZoneFile::SetFileModificationTime(time_t mt) { m_time_ = mt; }
 void ZoneFile::SetIOType(IOType io_type) { io_type_ = io_type; }
 
 ZoneFile::~ZoneFile() {
+  /*
   if (IsInitializedPrefetchBuffer()) {
     if (prefetch_buffer_->IsInprogress()) {
       zbd_->WaitPrefetch(prefetch_buffer_->GetUserData());
     }
     delete prefetch_buffer_;
   }
+  */
 
   ClearExtents();
 }
@@ -1101,6 +1103,7 @@ IOStatus ZonedSequentialFile::Read(size_t n, const IOOptions& /*options*/,
                                    Slice* result, char* scratch,
                                    IODebugContext* /*dbg*/) {
   IOStatus s;
+  // std::cout << "Seq. File Read, size " << n << std::endl;
 
   if (zoneFile_->IsPrefetchBufferAvailable(rp, n)) {
     // zoneFile_->GetZbd()->hitCounter++;
@@ -1144,6 +1147,7 @@ IOStatus ZonedSequentialFile::PositionedRead(uint64_t offset, size_t n,
                                              Slice* result, char* scratch,
                                              IODebugContext* /*dbg*/) {
   IOStatus ret;
+  // std::cout << "Seq. PositionedRead, size " << n << std::endl;
   if (zoneFile_->IsPrefetchBufferAvailable(offset, n)) {
     zoneFile_->GetZbd()->hitCounter++;
     zoneFile_->ReadFromBuffer(offset, n, result, scratch);
@@ -1157,8 +1161,8 @@ IOStatus ZonedSequentialFile::PositionedRead(uint64_t offset, size_t n,
 
   // Readahead
   // FIX: size threshold
-  if (zoneFile_->GetExpectedOffset() == offset && n >= 8192) {
-    // if (zoneFile_->GetExpectedOffset() == offset) {
+  // if (zoneFile_->GetExpectedOffset() == offset && n >= 8192) {
+  if (zoneFile_->GetExpectedOffset() == offset) {
     //  start offset : next read offset
     //  std::cout << "[Request Prefetch] " << offset + n << std::endl;
     //  std::cout << "[Request Prefetch] " << zoneFile_->GetFilename() << " : "
@@ -1181,7 +1185,7 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
     // ", "
     //           << n << std::endl;
     //  ishit = true;
-    // zoneFile_->GetZbd()->hitCounter++;
+    zoneFile_->GetZbd()->hitCounter++;
     zoneFile_->ReadFromBuffer(offset, n, result, scratch);
     zoneFile_->SetExpectedOffset(offset + n);
 
@@ -1193,7 +1197,7 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
     // zoneFile_->InvalidateBuffer();
   }
   // Read
-  // zoneFile_->GetZbd()->missCounter++;
+  zoneFile_->GetZbd()->missCounter++;
   ret = zoneFile_->PositionedRead(offset, n, result, scratch, direct_);
 
   // Readahead
@@ -1205,7 +1209,7 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
     //  std::cout << "[Request Prefetch] " << zoneFile_->GetFilename() << " : "
     //           << offset << ", " << n << std::endl;
     zoneFile_->RequestPrefetch(offset + n);
-    // zoneFile_->GetZbd()->raCounter++;
+    zoneFile_->GetZbd()->raCounter++;
 
   } else {
     zoneFile_->SetExpectedOffset(offset + n);

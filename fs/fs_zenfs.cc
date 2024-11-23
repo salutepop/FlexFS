@@ -177,6 +177,15 @@ IOStatus ZenMetaLog::AddRecord(const Slice& slice) {
   //<< " size : " << phys_sz << std::endl;
   // zbd_->written_meta_ += phys_sz;
   s = zone_->Append(buffer, phys_sz);
+  if (s == IOStatus::NoSpace()) {
+    std::cout << "[Meta AddRecord] Current meta zone full, rolling to next "
+                 "meta zone, size "
+              << phys_sz << std::endl;
+  }
+  if (!s.ok()) {
+    std::cout << "[Meta AddRecord] Fail !! Meta append " << phys_sz
+              << std::endl;
+  }
 
   free(buffer);
   return s;
@@ -291,15 +300,20 @@ ZenFS::~ZenFS() {
   */
   zbd_->LogZoneUsage();
   LogFiles();
+  std::cout << "Log Files" << std::endl;
 
   if (gc_worker_) {
     run_gc_worker_ = false;
     gc_worker_->join();
   }
+  std::cout << "GC Worker" << std::endl;
 
   meta_log_.reset(nullptr);
+  std::cout << "Meta log reset" << std::endl;
   ClearFiles();
+  std::cout << "Clear files" << std::endl;
   delete zbd_;
+  std::cout << "Delete zbd" << std::endl;
 }
 
 void ZenFS::GCWorker() {
@@ -440,7 +454,10 @@ void ZenFS::ClearFiles() {
   std::map<std::string, std::shared_ptr<ZoneFile>>::iterator it;
   std::lock_guard<std::mutex> file_lock(files_mtx_);
   for (it = files_.begin(); it != files_.end(); it++) it->second.reset();
+  std::cout << "Number of elements before clear: " << files_.size()
+            << std::endl;
   files_.clear();
+  std::cout << "Number of elements after clear: " << files_.size() << std::endl;
 }
 
 /* Assumes that files_mutex_ is held */
@@ -506,6 +523,7 @@ IOStatus ZenFS::WriteEndRecord(ZenMetaLog* meta_log) {
 }
 
 IOStatus ZenFS::PersistWritePonter(ZenMetaLog* meta_log) {
+  /*
   (void)meta_log;
   IOStatus s;
   std::string writePointer;
@@ -520,8 +538,14 @@ IOStatus ZenFS::PersistWritePonter(ZenMetaLog* meta_log) {
     return IOStatus::IOError("Fail to record writepointer");
   }
   return s;
+  */
 
-  /*
+  IOStatus s;
+  std::string writePointer;
+
+  std::lock_guard<std::mutex> file_lock(files_mtx_);
+  std::lock_guard<std::mutex> metadata_lock(metadata_sync_mtx_);
+
   EncodeWritePointerTo(&writePointer);
   // PutFixed32(&writePointer, kEndRecord);
   s = meta_log->AddRecord(writePointer);
@@ -537,7 +561,6 @@ IOStatus ZenFS::PersistWritePonter(ZenMetaLog* meta_log) {
     return IOStatus::IOError("Fail to record writepointer");
   }
   return s;
-  */
 }
 
 /* Assumes the files_mtx_ is held */

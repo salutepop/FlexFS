@@ -214,9 +214,15 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
     // LOG("over max buffersize", max_trf_size_ * (qd_ - 1));
 
     if (size > max_trf_size_ * qd_ * 2) {
-      std::cout << "[Error-Read] Too long size (over 8MB), offset " << offset
-                << " size " << size << std::endl;
-      return -EINVAL;
+      if (use_tempbuffer) {
+        std::cout << "[Error-Read] Too long size (over 16MB), offset " << offset
+                  << " size " << size << std::endl;
+        return -EINVAL;
+
+      } else {
+        std::cout << "[Warning-Read] Too long size (over 16MB), offset "
+                  << offset << " size " << size << std::endl;
+      }
 
     } else {
       std::cout << "[Warning-Read] Too long size (over 8MB), offset " << offset
@@ -277,14 +283,15 @@ int UringCmd::uringCmdRead(int fd, int ns, off_t offset, size_t size,
   }
 
   // std::cout << "[READ] &ring " << &ring_ << " offset " << offset << " size "
-  //<< size << std::endl;
-  //    TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
-  //    return nRead;
+  //           << size << std::endl;
+  //     TODO: 실제 읽은 block size를 전달할 지, 요청한 size를 전달할지 고민됨.
+  //     return nRead;
   return size;
 }
 
 int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
                             void *buf, uint32_t dspec) {
+  (void)dspec;
   const uint32_t kPlacementMode = 2;
   int ret = 0;
   int maxBlocks = 64;  // 256KB
@@ -305,14 +312,14 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
   //   INFO: 너무 긴 경우(>8MB) 예외처리
   if (size > maxTfrbytes * qd_) {
     // if (size > maxTfrbytes * qd_) {
-    if (size > max_trf_size_ * qd_ * 2) {
-      std::cout << "[Error-Write] Too long size (over 8MB), offset " << offset
-                << " size " << size << std::endl;
-      return -EINVAL;
-    } else {
-      std::cout << "[Warning-Write] Too long size (over 8MB), offset " << offset
-                << " size " << size << std::endl;
-    }
+    // if (size > max_trf_size_ * qd_ * 2) {
+    // std::cout << "[Error-Write] Too long size (over 8MB), offset " << offset
+    //<< " size " << size << std::endl;
+    // return -EINVAL;
+    //} else {
+    std::cout << "[Warning-Write] Too long size (over 8MB), offset " << offset
+              << " size " << size << std::endl;
+    //}
   }
 
   while (left > 0) {
@@ -326,8 +333,10 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
       return -EIO;
 
     } else {
+      // prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf +
+      // nWritten, userdata, kPlacementMode, dspec);
       prepUringCmd(fd, ns, op_write, zOffset, nCurSize, (char *)buf + nWritten,
-                   userdata, kPlacementMode, dspec);
+                   userdata, kPlacementMode, 0);
       /*
       submitCommand();
       ret = waitCompleted();
@@ -359,6 +368,8 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     // INFO: misOffset은 처음 한번만 반영
     misOffset = 0;
     if (loop % qd_ == 0) {
+      std::cout << "[Write-Submit] loop " << loop << " left " << left
+                << " nWritten " << nWritten << std::endl;
       skip_complete = true;
       submitCommand();
       addRequest(userdata, qd_);
@@ -371,9 +382,9 @@ int UringCmd::uringCmdWrite(int fd, int ns, off_t offset, size_t size,
     }
   }
   // std::cout << "[WRITE] &ring " << &ring_ << " offset " << offset << " size "
-  //<< size << " nloop " << loop << " userdata " << userdata
-  //<< std::endl;
-  // TODO: Batch I/O 분석 필요
+  //           << size << " nloop " << loop << " userdata " << userdata
+  //           << std::endl;
+  //  TODO: Batch I/O 분석 필요
   if (!skip_complete) {
     submitCommand();
     addRequest(userdata, loop % qd_);
