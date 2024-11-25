@@ -57,12 +57,12 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
                                unsigned int *max_open_zones) {
   /* The non-direct file descriptor acts as an exclusive-use semaphore */
   if (exclusive) {
-    read_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY | O_EXCL);
+    read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY | O_EXCL);
     // INFO: uringCmdRead -> pread (block align..)
     // read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY |
     // O_EXCL);
   } else {
-    read_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY);
+    read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY);
     // INFO: uringCmdRead -> pread (block align..)
     // read_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY |
     // O_EXCL);
@@ -75,10 +75,10 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
         "Failed to open zoned block device for read: " + ErrorToString(errno));
   }
 
-  // read_direct_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_RDONLY |
-  // O_DIRECT);
-  read_direct_f_ = read_f_;  // O_DIRECT flag support is not present with
-                             // nvme-ns charatcer devices
+  read_direct_f_ =
+      fdp_.openNvmeDevice(false, filename_.c_str(), O_RDONLY | O_DIRECT);
+  // read_direct_f_ = read_f_;  // O_DIRECT flag support is not present with
+  //// nvme-ns charatcer devices
 
   if (read_direct_f_ < 0) {
     return IOStatus::InvalidArgument(
@@ -90,7 +90,7 @@ IOStatus UringlibBackend::Open(bool readonly, bool exclusive,
     write_f_ = -1;
     write_bf_ = -1;
   } else {
-    write_f_ = fdp_.openNvmeDevice(true, filename_.c_str(), O_WRONLY);
+    write_f_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_WRONLY);
     write_bf_ = fdp_.openNvmeDevice(false, filename_.c_str(), O_WRONLY);
     if ((write_f_ < 0) || (write_bf_ < 0)) {
       return IOStatus::InvalidArgument(
@@ -191,8 +191,9 @@ std::unique_ptr<ZoneList> UringlibBackend::ListZones() {
 
 IOStatus UringlibBackend::Delete(uint64_t start, uint64_t size) {
   int err;
-  err = uringCmd_->uringDiscard(write_bf_, start, size);
-  std::cout << "[Delete] Offset : " << start << " Size : " << size << std::endl;
+  err = uringCmd_->uringDiscard(write_f_, start, size);
+  // std::cout << "[Delete] Offset : " << start << " Size : " << size <<
+  // std::endl;
   if (err) {
     return IOStatus::IOError("Discard fail");
   }
@@ -210,9 +211,9 @@ IOStatus UringlibBackend::Reset(uint64_t start, bool *offline,
     zone_sz = zone_sz_ * MERGE_META_ZONES;
   }
 
-  err = uringCmd_->uringDiscard(write_bf_, start, zone_sz);
+  err = uringCmd_->uringDiscard(write_f_, start, zone_sz);
   // std::cout << "[Discard] Offset : " << start << " Size : " << zone_sz_
-  //<< std::endl;
+  //           << " err " << err << std::endl;
   if (err) {
     return IOStatus::IOError("Discard fail");
   }
@@ -273,15 +274,24 @@ int UringlibBackend::InvalidateCache(uint64_t pos, uint64_t size) {
 }
 
 int UringlibBackend::Read(char *buf, int size, uint64_t pos, bool direct) {
+  // std::cout << "[Read]" << pos << ", " << size << ", " << direct <<
+  // std::endl;
+  return pread(direct ? read_direct_f_ : read_f_, buf, size, pos);
+  /*
   if (!isUringCmdInitialized()) {
     initializeUringCmd();
   }
   return uringCmd_->uringCmdRead(direct ? read_direct_f_ : read_f_,
                                  fdp_.getNvmeData().nsId(), pos, size, buf);
+  */
 }
 
 int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos,
                            uint32_t whint) {
+  (void)whint;
+  // std::cout << "[Write]" << pos << ", " << size << std::endl;
+  return pwrite(write_f_, data, size, pos);
+  /*
   if (!isUringCmdInitialized()) {
     initializeUringCmd();
   }
@@ -295,6 +305,7 @@ int UringlibBackend::Write(char *data, uint32_t size, uint64_t pos,
   ret = uringCmd_->uringCmdWrite(write_f_, fdp_.getNvmeData().nsId(), pos, size,
                                  data, dspec);
   return ret;
+  */
 }
 
 int UringlibBackend::RequestPrefetch(char *buf, int size, uint64_t pos,

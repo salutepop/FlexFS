@@ -1208,8 +1208,8 @@ IOStatus ZonedRandomAccessFile::Read(uint64_t offset, size_t n,
     //  std::cout << "[Request Prefetch] " << offset + n << std::endl;
     //  std::cout << "[Request Prefetch] " << zoneFile_->GetFilename() << " : "
     //           << offset << ", " << n << std::endl;
-    zoneFile_->RequestPrefetch(offset + n);
-    zoneFile_->GetZbd()->raCounter++;
+    // zoneFile_->RequestPrefetch(offset + n);
+    // zoneFile_->GetZbd()->raCounter++;
 
   } else {
     zoneFile_->SetExpectedOffset(offset + n);

@@ -138,6 +138,10 @@ if (iovecs_) {
     uint64_t range[2];
     uint64_t max_discard_byte = 3221225472;  // 3GB
     uint64_t discarded = 0;
+    if (fsync(fd) < 0) {  // 또는 fdatasync(fd)
+      std::cout << "fsync failed" << std::endl;
+      return errno;
+    }
 
     // 3GB 씩 나눠서 discard
     while (discarded < len) {
