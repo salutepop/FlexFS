@@ -1,0 +1,1368 @@
+From 1974cea3c30c44d9a83a8d3aa835086bb1aa7dfa Mon Sep 17 00:00:00 2001
+From: Changmin Jeon <salutepop@gmail.com>
+Date: Fri, 13 Dec 2024 15:46:32 +0900
+Subject: [PATCH] rocksdb modified
+
+---
+ batch.sh                                      |   1 +
+ build.sh                                      |  15 +
+ db/column_family.cc                           |  29 +-
+ db/db_impl/db_impl.cc                         | 316 ++++++++++++++-
+ db/db_impl/db_impl.h                          |  11 +-
+ env/fs_posix.cc                               |  13 +
+ env/io_posix.cc                               |  21 +-
+ env/io_posix.h                                |   1 +
+ file/file_prefetch_buffer.cc                  |  40 ++
+ file/file_prefetch_buffer.h                   |  16 +-
+ include/rocksdb/env.h                         |   3 +
+ run.sh                                        |  39 ++
+ table/block_based/block_based_table_reader.cc |  20 +-
+ table/block_fetcher.cc                        |   4 +
+ waf_logging.patch                             | 375 ++++++++++++++++++
+ 15 files changed, 888 insertions(+), 16 deletions(-)
+ create mode 100755 batch.sh
+ create mode 100755 build.sh
+ create mode 100755 run.sh
+ create mode 100644 waf_logging.patch
+
+diff --git a/batch.sh b/batch.sh
+new file mode 100755
+index 000000000..1946b3892
+--- /dev/null
++++ b/batch.sh
+@@ -0,0 +1 @@
++sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=100000000
+diff --git a/build.sh b/build.sh
+new file mode 100755
+index 000000000..1833e7ee9
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,15 @@
++#sudo make install
++#sudo make uninstall
++#sudo make clean
++#sudo ROCKSDB_PLUGINS="flexfs" make static_lib db_bench -j16 install
++#sudo DEBUG_LEVEL=0 ROCKSDB_PLUGINS="flexfs" make dbg -j16 install
++#sudo DEBUG_LEVEL=0 ROCKSDB_PLUGINS="flexfs" make -j16 db_bench install
++#sudo ROCKSDB_PLUGINS="flexfs" make gdb -j16 db_bench install
++#sudo make shared_lib -j16 install ROCKSDB_PLUGINS="flexfs" db_bench
++#sudo make -j16 db_bench install ROCKSDB_PLUGINS="flexfs"
++sudo DEBUG_LEVEL=0 ROCKSDB_PLUGINS=flexfs make -j16 db_bench install
++#sudo make shared_lib -j16 db_bench install ROCKSDB_PLUGINS="flexfs"
++#
++pushd ./plugin/flexfs/util/
++make clean; make
++popd
+diff --git a/db/column_family.cc b/db/column_family.cc
+index 2b606ec40..fe949104a 100644
+--- a/db/column_family.cc
++++ b/db/column_family.cc
+@@ -202,9 +202,9 @@ const uint64_t kDefaultPeriodicCompSecs = 0xfffffffffffffffe;
+ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
+                                     const ColumnFamilyOptions& src) {
+   ColumnFamilyOptions result = src;
+-  size_t clamp_max = std::conditional<
+-      sizeof(size_t) == 4, std::integral_constant<size_t, 0xffffffff>,
+-      std::integral_constant<uint64_t, 64ull << 30>>::type::value;
++  size_t clamp_max = std::conditional < sizeof(size_t) == 4,
++         std::integral_constant<size_t, 0xffffffff>,
++         std::integral_constant < uint64_t, 64ull << 30 >> ::type::value;
+   ClipToRange(&result.write_buffer_size, (static_cast<size_t>(64)) << 10,
+               clamp_max);
+   // if user sets arena_block_size, we trust user to use this value. Otherwise,
+@@ -1555,12 +1555,33 @@ Env::WriteLifeTimeHint ColumnFamilyData::CalculateSSTWriteHint(int level) {
+   if (initial_cf_options_.compaction_style != kCompactionStyleLevel) {
+     return Env::WLTH_NOT_SET;
+   }
++  /* final, split
++  switch (level) {
++    case 0:
++      return Env::WLTH_MEDIUM;
++    case 1:
++      return Env::WLTH_MEDIUM;
++    case 2:
++      return Env::WLTH_LONG;
++    case 3:
++      return Env::WLTH_EXTREME;
++    case 4:
++      return Env::WLTH_EXTREME_2;
++    case 5:
++      return Env::WLTH_EXTREME_3;
++    case 6:
++      return Env::WLTH_EXTREME_4;
++    default:
++      return Env::WLTH_NOT_SET;
++  }
++  */
++
+   if (level == 0) {
+     return Env::WLTH_MEDIUM;
+   }
+   int base_level = current_->storage_info()->base_level();
+ 
+-  // L1: medium, L2: long, ...
++  /// L1: medium, L2: long, ...
+   if (level - base_level >= 2) {
+     return Env::WLTH_EXTREME;
+   } else if (level < base_level) {
+diff --git a/db/db_impl/db_impl.cc b/db/db_impl/db_impl.cc
+index 4e28454d6..ccb127f0b 100644
+--- a/db/db_impl/db_impl.cc
++++ b/db/db_impl/db_impl.cc
+@@ -76,6 +76,15 @@
+ #ifdef ROCKSDB_JEMALLOC
+ #include "port/jemalloc_helper.h"
+ #endif
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include <array>
++#include <iostream>
++#include <sstream>
++#include <string>
++
+ #include "port/port.h"
+ #include "rocksdb/cache.h"
+ #include "rocksdb/compaction_filter.h"
+@@ -112,7 +121,6 @@
+ #include "util/string_util.h"
+ #include "util/udt_util.h"
+ #include "utilities/trace/replayer_impl.h"
+-
+ namespace ROCKSDB_NAMESPACE {
+ 
+ const std::string kDefaultColumnFamilyName("default");
+@@ -1180,6 +1188,43 @@ void DBImpl::DumpStats() {
+   ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                  "------- DUMPING STATS -------");
+   ROCKS_LOG_INFO(immutable_db_options_.info_log, "%s", stats.c_str());
++  ROCKS_LOG_INFO(immutable_db_options_.info_log,
++                 "------- NVME WRITTEN DATA -------");
++  std::ostringstream oss;
++  std::vector<uint64_t> smart_log = GetSmartAddLog("/dev/nvme0");
++  // std::vector<uint64_t> smart_log = GetSmartLog("/dev/nvme2n2");
++  std::string waf_d0 = GetWaf_D0("/dev/nvme0");
++  oss << std::endl;
++  if (smart_log.size() == 1) {
++    oss << "[DEBUG] Data Units Written: " << smart_log[0] * 512 * 1000
++        << " Bytes " << std::endl;
++    oss << "[DEBUG] Data Units Written: "
++        << smart_log[0] * 512 * 1000 / 1024 / 1024 / 1024 << " GiB"
++        << std::endl;
++
++  } else if (smart_log.size() == 3) {
++    oss << "[DEBUG] Written Data Units " << smart_log[0] * 512 * 1000
++        << " Physical " << smart_log[1] << " Bytes" << std::endl;
++    oss << "[DEBUG] Written Data Units "
++        << smart_log[0] * 512 * 1000 / 1024 / 1024 / 1024 << " Physical "
++        << smart_log[1] / 1024 / 1024 / 1024 << " (GiB)" << std::endl;
++    oss << "[DEBUG] Free block: " << smart_log[2] << " %" << std::endl;
++  } else {
++    oss << "[DEBUG] Can't get smart log" << std::endl;
++  }
++  oss << "[DEBUG] WAF from 0xD0: " << waf_d0 << std::endl;
++  oss << "[DEBUG] Cumulative ingest: "
++      << ExtractValueFromLine(stats, "Cumulative writes", "ingest:") << " GB"
++      << std::endl;
++  oss << "[DEBUG] Cumulative WAL: "
++      << ExtractValueFromLine(stats, "Cumulative WAL", "written:") << " GB"
++      << std::endl;
++  oss << "[DEBUG] Cumulative Compaction: "
++      << ExtractValueFromLine(stats, "Cumulative compaction", "compaction:")
++      << " GB" << std::endl;
++  ROCKS_LOG_INFO(immutable_db_options_.info_log, "%s", oss.str().c_str());
++  ROCKS_LOG_INFO(immutable_db_options_.info_log,
++                 "------- NVME WRITTEN DATA -------");
+   if (immutable_db_options_.dump_malloc_stats) {
+     stats.clear();
+     DumpMallocStats(&stats);
+@@ -6661,4 +6706,273 @@ void DBImpl::InstallSeqnoToTimeMappingInSV(
+   bg_cv_.SignalAll();
+ }
+ 
++std::vector<uint64_t> DBImpl::GetSmartLog(const std::string& device) {
++  // Command and arguments to pass to execvp
++  char* args[] = {(char*)"nvme", (char*)"smart-log", (char*)device.c_str(),
++                  nullptr};
++  std::vector<uint64_t> values;
++
++  // Create a pipe for communication between processes
++  int pipefd[2];
++  if (pipe(pipefd) == -1) {
++    std::cerr << "Failed to create pipe" << std::endl;
++    return values;
++  }
++
++  // Fork a new process
++  pid_t pid = fork();
++  if (pid == -1) {
++    std::cerr << "Failed to fork process" << std::endl;
++    return values;
++  } else if (pid == 0) {  // Child process
++    // Close the read end of the pipe in the child process
++    close(pipefd[0]);
++    // Redirect stdout to the write end of the pipe
++    dup2(pipefd[1], STDOUT_FILENO);
++    // Close the write end of the pipe as it is now duplicated
++    close(pipefd[1]);
++
++    // Execute the nvme smart-log command
++    execvp(args[0], args);
++
++    // If execvp fails, exit the child process
++    std::cerr << "execvp failed" << std::endl;
++    _exit(1);
++  } else {  // Parent process
++    // Close the write end of the pipe in the parent process
++    close(pipefd[1]);
++
++    // Read from the read end of the pipe
++    std::array<char, 128> buffer;
++    std::string result;  // Ensure result is defined as std::string
++    ssize_t bytesRead;
++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
++      result.append(buffer.data(), bytesRead);  // Append read data to result
++    }
++
++    // Close the read end of the pipe
++    close(pipefd[0]);
++
++    // Wait for the child process to finish
++    waitpid(pid, nullptr, 0);
++
++    std::string intStr;
++    uint64_t value;
++
++    intStr = ExtractValueFromLine(result, "Data Units Written", ":");
++    value = std::stoll(intStr);  // written data(bytes)
++    values.push_back(value);
++  }
++
++  // Return 0 if "Data Units Written" not found
++  return values;
++}
++
++std::vector<uint64_t> DBImpl::GetSmartAddLog(const std::string& device) {
++  // Command and arguments to pass to execvp
++  char* args[] = {(char*)"nvme", (char*)"ocp", (char*)"smart-add-log",
++                  (char*)device.c_str(), nullptr};
++  std::vector<uint64_t> values;
++
++  std::vector<uint64_t> smart_values = GetSmartLog(device.c_str());
++  if (smart_values.size() == 1) {
++    values.push_back(smart_values[0]);
++  } else {
++    values.push_back(0);
++  }
++
++  // Create a pipe for communication between processes
++  int pipefd[2];
++  if (pipe(pipefd) == -1) {
++    std::cerr << "Failed to create pipe" << std::endl;
++    return values;
++  }
++
++  // Fork a new process
++  pid_t pid = fork();
++  if (pid == -1) {
++    std::cerr << "Failed to fork process" << std::endl;
++    return values;
++  } else if (pid == 0) {  // Child process
++    // Close the read end of the pipe in the child process
++    close(pipefd[0]);
++    // Redirect stdout to the write end of the pipe
++    dup2(pipefd[1], STDOUT_FILENO);
++    // Close the write end of the pipe as it is now duplicated
++    close(pipefd[1]);
++
++    // Execute the nvme smart-log command
++    execvp(args[0], args);
++
++    // If execvp fails, exit the child process
++    std::cerr << "execvp failed" << std::endl;
++    _exit(1);
++  } else {  // Parent process
++    // Close the write end of the pipe in the parent process
++    close(pipefd[1]);
++
++    // Read from the read end of the pipe
++    std::array<char, 128> buffer;
++    std::string result;  // Ensure result is defined as std::string
++    ssize_t bytesRead;
++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
++      result.append(buffer.data(), bytesRead);  // Append read data to result
++    }
++
++    // Close the read end of the pipe
++    close(pipefd[0]);
++
++    // Wait for the child process to finish
++    waitpid(pid, nullptr, 0);
++
++    std::string intStr;
++    uint64_t value;
++
++    intStr = ExtractValueFromLine(result, "written", "0");
++    value = std::stoll(intStr);  // written data(bytes)
++    values.push_back(value);
++
++    intStr = ExtractValueFromLine(result, "free", "blocks");
++    value = std::stoll(intStr);  // % of free blocks
++    values.push_back(value);
++    /*
++    // Parse the "Data Units Written" value from the command output
++    std::istringstream iss(result);
++    std::string line;
++
++    while (std::getline(iss, line)) {
++      if (line.find("Data Units Written") != std::string::npos) {
++        std::istringstream lineStream(line);
++        std::string label;
++        uint64_t value;
++        while (lineStream >> label) {
++          std::cout << "LABEL : " << label << std::endl;
++          if (label == ":") {
++            lineStream >> value;
++            return value * 512 * 1000;
++          }
++        }
++      }
++    }
++    */
++  }
++
++  // Return 0 if "Data Units Written" not found
++  return values;
++}
++
++std::string DBImpl::GetWaf_D0(const std::string& device) {
++  // Command and arguments to pass to execvp
++  char* args[] = {
++      (char*)"nvme", (char*)"get-log", (char*)"-l",           (char*)"8",
++      (char*)"-i",   (char*)"0xD0",    (char*)device.c_str(), nullptr};
++
++  // Create a pipe for communication between processes
++  int pipefd[2];
++  if (pipe(pipefd) == -1) {
++    std::cerr << "Failed to create pipe" << std::endl;
++    return "";
++  }
++
++  // Fork a new process
++  pid_t pid = fork();
++  if (pid == -1) {
++    std::cerr << "Failed to fork process" << std::endl;
++    return "";
++  } else if (pid == 0) {  // Child process
++    // Close the read end of the pipe in the child process
++    close(pipefd[0]);
++    // Redirect stdout to the write end of the pipe
++    dup2(pipefd[1], STDOUT_FILENO);
++    // Close the write end of the pipe as it is now duplicated
++    close(pipefd[1]);
++
++    // Execute the nvme smart-log command
++    execvp(args[0], args);
++
++    // If execvp fails, exit the child process
++    std::cerr << "execvp failed" << std::endl;
++    _exit(1);
++  } else {  // Parent process
++    // Close the write end of the pipe in the parent process
++    close(pipefd[1]);
++
++    // Read from the read end of the pipe
++    std::array<char, 128> buffer;
++    std::string result;  // Ensure result is defined as std::string
++    ssize_t bytesRead;
++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
++      result.append(buffer.data(), bytesRead);  // Append read data to result
++    }
++
++    // Close the read end of the pipe
++    close(pipefd[0]);
++
++    // Wait for the child process to finish
++    waitpid(pid, nullptr, 0);
++
++    // std::cout << "[[[DEBUG]]]" << result << std::endl;
++    std::string hexStr;
++
++    hexStr = ExtractValueFromLine(result, "0000:", "0000:");
++    return hexStr;
++    // uint64_t value;
++    //  std::cout << "[[[HexStr]]]" << hexStr << std::endl;
++    //  value = std::stoull(hexStr, nullptr, 16);
++    //  std::cout << "[[[Value]]]" << value << std::endl;
++    //  return value;
++
++    /*
++    // Parse the "Data Units Written" value from the command output
++    std::istringstream iss(result);
++    std::string line;
++
++    while (std::getline(iss, line)) {
++      if (line.find("Data Units Written") != std::string::npos) {
++        std::istringstream lineStream(line);
++        std::string label;
++        uint64_t value;
++        while (lineStream >> label) {
++          std::cout << "LABEL : " << label << std::endl;
++          if (label == ":") {
++            lineStream >> value;
++            return value * 512 * 1000;
++          }
++        }
++      }
++    }
++    */
++  }
++
++  // Return 0 if "Data Units Written" not found
++  return "";
++}
++
++std::string DBImpl::ExtractValueFromLine(const std::string& input,
++                                         const std::string& lineStart,
++                                         const std::string& targetWord) {
++  std::istringstream iss(input);
++  std::string line;
++
++  // 입력 문자열에서 한 줄씩 읽기
++  while (std::getline(iss, line)) {
++    // if (line.find(lineStart) == 0) {  // 줄의 시작을 확인하려면 == 0을 사용
++    if (line.find(lineStart) != std::string::npos) {  // 줄의 임의 위치에서 찾기
++      std::istringstream lineStream(line);
++      std::string word;
++
++      // 각 단어를 읽어 지정된 단어를 찾기
++      while (lineStream >> word) {
++        if (word == targetWord) {
++          std::string value;
++          if (lineStream >> value) {
++            return value;  // 찾은 값을 반환
++          }
++        }
++      }
++    }
++  }
++  return "0";  // 지정된 줄이나 값을 찾지 못한 경우 빈 문자열 반환
++}
++
+ }  // namespace ROCKSDB_NAMESPACE
+diff --git a/db/db_impl/db_impl.h b/db/db_impl/db_impl.h
+index 8192269ed..2ee260428 100644
+--- a/db/db_impl/db_impl.h
++++ b/db/db_impl/db_impl.h
+@@ -1830,8 +1830,8 @@ class DBImpl : public DB {
+     const InternalKey* begin = nullptr;  // nullptr means beginning of key range
+     const InternalKey* end = nullptr;    // nullptr means end of key range
+     InternalKey* manual_end = nullptr;   // how far we are compacting
+-    InternalKey tmp_storage;      // Used to keep track of compaction progress
+-    InternalKey tmp_storage1;     // Used to keep track of compaction progress
++    InternalKey tmp_storage;   // Used to keep track of compaction progress
++    InternalKey tmp_storage1;  // Used to keep track of compaction progress
+ 
+     // When the user provides a canceled pointer in CompactRangeOptions, the
+     // above varaibe is the reference of the user-provided
+@@ -2229,6 +2229,13 @@ class DBImpl : public DB {
+ 
+   size_t EstimateInMemoryStatsHistorySize() const;
+ 
++  std::vector<uint64_t> GetSmartLog(const std::string& device);
++  std::vector<uint64_t> GetSmartAddLog(const std::string& device);
++  std::string GetWaf_D0(const std::string& device);
++  std::string ExtractValueFromLine(const std::string& input,
++                                   const std::string& lineStart,
++                                   const std::string& targetWord);
++
+   // Return the minimum empty level that could hold the total data in the
+   // input level. Return the input level, if such level could not be found.
+   int FindMinimumEmptyLevelFitting(ColumnFamilyData* cfd,
+diff --git a/env/fs_posix.cc b/env/fs_posix.cc
+index 6d95d9a2e..f1b610f38 100644
+--- a/env/fs_posix.cc
++++ b/env/fs_posix.cc
+@@ -10,6 +10,8 @@
+ #if !defined(OS_WIN)
+ 
+ #include <dirent.h>
++
++#include <iostream>
+ #ifndef ROCKSDB_NO_DYNAMIC_EXTENSION
+ #include <dlfcn.h>
+ #endif
+@@ -284,6 +286,7 @@ class PosixFileSystem : public FileSystem {
+     IOStatus s;
+     int fd = -1;
+     int flags = (reopen) ? (O_CREAT | O_APPEND) : (O_CREAT | O_TRUNC);
++    ////std::cout << "[Open] " << fname;
+     // Direct IO mode with O_DIRECT flag or F_NOCAHCE (MAC OSX)
+     if (options.use_direct_writes && !options.use_mmap_writes) {
+       // Note: we should avoid O_APPEND here due to ta the following bug:
+@@ -296,6 +299,7 @@ class PosixFileSystem : public FileSystem {
+       flags |= O_WRONLY;
+ #if !defined(OS_MACOSX) && !defined(OS_OPENBSD) && !defined(OS_SOLARIS)
+       flags |= O_DIRECT;
++      // std::cout << "-[Enable Direct I/O]";
+ #endif
+       TEST_SYNC_POINT_CALLBACK("NewWritableFile:O_DIRECT", &flags);
+     } else if (options.use_mmap_writes) {
+@@ -305,6 +309,14 @@ class PosixFileSystem : public FileSystem {
+       flags |= O_WRONLY;
+     }
+ 
++    // std::cout << std::endl;
++    //  CM-DEBUG
++    //
++    // if (EndsWith(fname, ".log")) {
++    // flags |= O_DIRECT;
++    // std::cout << "-[Enable Direct I/O]" << std::endl;
++    // std::cout << "[Open file] " << fname << std::endl;
++    //}
+     flags = cloexec_flags(flags, &options);
+ 
+     do {
+@@ -623,6 +635,7 @@ class PosixFileSystem : public FileSystem {
+     if (unlink(fname.c_str()) != 0) {
+       result = IOError("while unlink() file", fname, errno);
+     }
++    // std::cout << "[DeleteFile] " << fname << std::endl;
+     return result;
+   }
+ 
+diff --git a/env/io_posix.cc b/env/io_posix.cc
+index f31ee7d16..968a1101e 100644
+--- a/env/io_posix.cc
++++ b/env/io_posix.cc
+@@ -14,6 +14,7 @@
+ 
+ #include <algorithm>
+ #include <cerrno>
++#include <iostream>
+ #if defined(OS_LINUX)
+ #include <linux/fs.h>
+ #ifndef FALLOC_FL_KEEP_SIZE
+@@ -866,7 +867,8 @@ IOStatus PosixRandomAccessFile::ReadAsync(
+   }
+ 
+ #if defined(ROCKSDB_IOURING_PRESENT)
+-  // io_uring_queue_init.
++  // std::cout << " use IO_URING" << std::endl;
++  //  io_uring_queue_init.
+   struct io_uring* iu = nullptr;
+   if (thread_local_io_urings_) {
+     iu = static_cast<struct io_uring*>(thread_local_io_urings_->Get());
+@@ -918,6 +920,7 @@ IOStatus PosixRandomAccessFile::ReadAsync(
+   }
+   return IOStatus::OK();
+ #else
++  // std::cout << " Not supported!!" << std::endl;
+   (void)req;
+   (void)cb;
+   (void)cb_arg;
+@@ -1291,6 +1294,8 @@ PosixWritableFile::PosixWritableFile(const std::string& fname, int fd,
+ }
+ 
+ PosixWritableFile::~PosixWritableFile() {
++  // std::cout << "[Destruct] " << filename_ << ", FileSize " << filesize_
++  //           << ", append_data " << append_data_.load() << std::endl;
+   if (fd_ >= 0) {
+     IOStatus s = PosixWritableFile::Close(IOOptions(), nullptr);
+     s.PermitUncheckedError();
+@@ -1306,6 +1311,9 @@ IOStatus PosixWritableFile::Append(const Slice& data, const IOOptions& /*opts*/,
+   const char* src = data.data();
+   size_t nbytes = data.size();
+ 
++  append_data_ += nbytes;
++  // std::cout << "[CM-Write] filename " << filename_ << " Append " << nbytes
++  //<< std::endl;
+   if (!PosixWrite(fd_, src, nbytes)) {
+     return IOError("While appending to file", filename_, errno);
+   }
+@@ -1325,6 +1333,8 @@ IOStatus PosixWritableFile::PositionedAppend(const Slice& data, uint64_t offset,
+   assert(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
+   const char* src = data.data();
+   size_t nbytes = data.size();
++  append_data_ += nbytes;
++  // std::cout << "[CM-Write] PositionedAppend " << nbytes << std::endl;
+   if (!PosixPositionedWrite(fd_, src, nbytes, static_cast<off_t>(offset))) {
+     return IOError("While pwrite to file at offset " + std::to_string(offset),
+                    filename_, errno);
+@@ -1337,6 +1347,7 @@ IOStatus PosixWritableFile::Truncate(uint64_t size, const IOOptions& /*opts*/,
+                                      IODebugContext* /*dbg*/) {
+   IOStatus s;
+   int r = ftruncate(fd_, size);
++  // std::cout << "[Truncate] " << filename_ << ", size " << size << std::endl;
+   if (r < 0) {
+     s = IOError("While ftruncate file to size " + std::to_string(size),
+                 filename_, errno);
+@@ -1389,6 +1400,7 @@ IOStatus PosixWritableFile::Close(const IOOptions& /*opts*/,
+ #endif
+   }
+ 
++  // std::cout << "[Close] " << filename_ << std::endl;
+   if (close(fd_) < 0) {
+     s = IOError("While closing file after writing", filename_, errno);
+   }
+@@ -1404,6 +1416,7 @@ IOStatus PosixWritableFile::Flush(const IOOptions& /*opts*/,
+ 
+ IOStatus PosixWritableFile::Sync(const IOOptions& /*opts*/,
+                                  IODebugContext* /*dbg*/) {
++  // std::cout << "[Sync] " << filename_ << std::endl;
+ #ifdef HAVE_FULLFSYNC
+   if (::fcntl(fd_, F_FULLFSYNC) < 0) {
+     return IOError("while fcntl(F_FULLFSYNC)", filename_, errno);
+@@ -1418,6 +1431,7 @@ IOStatus PosixWritableFile::Sync(const IOOptions& /*opts*/,
+ 
+ IOStatus PosixWritableFile::Fsync(const IOOptions& /*opts*/,
+                                   IODebugContext* /*dbg*/) {
++  // std::cout << "[Fsync] " << filename_ << std::endl;
+ #ifdef HAVE_FULLFSYNC
+   if (::fcntl(fd_, F_FULLFSYNC) < 0) {
+     return IOError("while fcntl(F_FULLFSYNC)", filename_, errno);
+@@ -1466,6 +1480,8 @@ IOStatus PosixWritableFile::InvalidateCache(size_t offset, size_t length) {
+   (void)length;
+   return IOStatus::OK();
+ #else
++  // std::cout << "[InvalidateCache] " << filename_ << ", offset " << offset
++  //<< ", length " << length << std::endl;
+   // free OS pages
+   int ret = Fadvise(fd_, offset, length, POSIX_FADV_DONTNEED);
+   if (ret == 0) {
+@@ -1479,6 +1495,7 @@ IOStatus PosixWritableFile::InvalidateCache(size_t offset, size_t length) {
+ IOStatus PosixWritableFile::Allocate(uint64_t offset, uint64_t len,
+                                      const IOOptions& /*opts*/,
+                                      IODebugContext* /*dbg*/) {
++  // std::cout << "[Allocate] " << filename_ << ", len " << len << std::endl;
+   assert(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
+   assert(len <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
+   TEST_KILL_RANDOM("PosixWritableFile::Allocate:0");
+@@ -1502,6 +1519,8 @@ IOStatus PosixWritableFile::Allocate(uint64_t offset, uint64_t len,
+ IOStatus PosixWritableFile::RangeSync(uint64_t offset, uint64_t nbytes,
+                                       const IOOptions& opts,
+                                       IODebugContext* dbg) {
++  // std::cout << "[RangeSync] " << filename_ << ", offset " << offset
++  //<< ", nbytes " << nbytes << std::endl;
+ #ifdef ROCKSDB_RANGESYNC_PRESENT
+   assert(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
+   assert(nbytes <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
+diff --git a/env/io_posix.h b/env/io_posix.h
+index 603af2f88..2d605d1d0 100644
+--- a/env/io_posix.h
++++ b/env/io_posix.h
+@@ -332,6 +332,7 @@ class PosixWritableFile : public FSWritableFile {
+   int fd_;
+   uint64_t filesize_;
+   size_t logical_sector_size_;
++  std::atomic<uint64_t> append_data_{0};
+ #ifdef ROCKSDB_FALLOCATE_PRESENT
+   bool allow_fallocate_;
+   bool fallocate_with_keep_size_;
+diff --git a/file/file_prefetch_buffer.cc b/file/file_prefetch_buffer.cc
+index 73050aed7..9519eb678 100644
+--- a/file/file_prefetch_buffer.cc
++++ b/file/file_prefetch_buffer.cc
+@@ -20,6 +20,7 @@
+ #include "util/random.h"
+ #include "util/rate_limiter_impl.h"
+ 
++// #define CM_DEBUG
+ namespace ROCKSDB_NAMESPACE {
+ 
+ void FilePrefetchBuffer::PrepareBufferForRead(BufferInfo* buf, size_t alignment,
+@@ -56,16 +57,36 @@ void FilePrefetchBuffer::PrepareBufferForRead(BufferInfo* buf, size_t alignment,
+   // Create a new buffer only if current capacity is not sufficient, and memcopy
+   // bytes from old buffer if needed (i.e., if aligned_useful_len is greater
+   // than 0).
++#ifdef CM_DEBUG
++  // if (buf->buffer_.Capacity() != 266240) {
++  std::cout << "Buffer counts : " << NumBuffersAllocated()
++            << ", buffer capa.: " << buf->buffer_.Capacity()
++            << ", roundup_len: " << roundup_len;
++  //}
++#endif
++
+   if (buf->buffer_.Capacity() < roundup_len) {
+     buf->buffer_.Alignment(alignment);
+     buf->buffer_.AllocateNewBuffer(
+         static_cast<size_t>(roundup_len), copy_data_to_new_buffer,
+         aligned_useful_offset_in_buf, static_cast<size_t>(aligned_useful_len));
++// CM_DEBUG
++#ifdef CM_DEBUG
++    std::cout << ", [1. New-not enough] Buffer size : "
++              << buf->buffer_.Capacity() << std::endl;
++#endif
+   } else if (aligned_useful_len > 0 && refit_tail) {
+     // New buffer not needed. But memmove bytes from tail to the beginning since
+     // aligned_useful_len is greater than 0.
+     buf->buffer_.RefitTail(static_cast<size_t>(aligned_useful_offset_in_buf),
+                            static_cast<size_t>(aligned_useful_len));
++#ifdef CM_DEBUG
++    // if (buf->buffer_.Capacity() != 266240) {
++    std::cout << ", [2. Refit] Buffer size : " << buf->buffer_.Capacity()
++              << ", offset: " << aligned_useful_offset_in_buf
++              << ", len: " << aligned_useful_len << std::endl;
++    //}
++#endif
+   } else if (aligned_useful_len > 0) {
+     // For async prefetching, it doesn't call RefitTail with aligned_useful_len
+     // > 0. Allocate new buffer if needed because aligned buffer calculate
+@@ -76,6 +97,10 @@ void FilePrefetchBuffer::PrepareBufferForRead(BufferInfo* buf, size_t alignment,
+     buf->buffer_.AllocateNewBuffer(
+         static_cast<size_t>(roundup_len), copy_data_to_new_buffer,
+         aligned_useful_offset_in_buf, static_cast<size_t>(aligned_useful_len));
++#ifdef CM_DEBUG
++    std::cout << ", [3. New aligned] Buffer size : " << buf->buffer_.Capacity()
++              << std::endl;
++#endif
+   }
+ }
+ 
+@@ -235,6 +260,9 @@ void FilePrefetchBuffer::AbortOutdatedIO(uint64_t offset) {
+       buf->async_read_in_progress_ = false;
+     }
+     buf->ClearBuffer();
++#ifdef CM_DEBUG
++    std::cout << "[Clear Buffer] - AbortOutdatedIO" << std::endl;
++#endif
+   }
+ }
+ 
+@@ -267,6 +295,7 @@ void FilePrefetchBuffer::AbortAllIOs() {
+ // front/first buffer in bufs_ should contain this offset, otherwise, all
+ // buffers will be freed.
+ void FilePrefetchBuffer::ClearOutdatedData(uint64_t offset, size_t length) {
++  // std::cout << "[Enter] ClearOutdatedData" << std::endl;
+   while (!IsBufferQueueEmpty()) {
+     BufferInfo* buf = GetFirstBuffer();
+     // Offset is greater than this buffer's end offset.
+@@ -303,6 +332,9 @@ void FilePrefetchBuffer::ClearOutdatedData(uint64_t offset, size_t length) {
+     // buffer with offset doesn't contain data or offset doesn't lie in this
+     // buffer.
+     buf->ClearBuffer();
++
++    std::cout << "[Clear Buffer] - ClearOutdatedData" << std::endl;
++
+     abort_io = true;
+   }
+ 
+@@ -311,6 +343,8 @@ void FilePrefetchBuffer::ClearOutdatedData(uint64_t offset, size_t length) {
+     // Clear all buffers after first.
+     for (size_t i = 1; i < bufs_.size(); ++i) {
+       bufs_[i]->ClearBuffer();
++      std::cout << "[Clear All of Buffers] - ClearOutdatedData, buffer " << i
++                << std::endl;
+     }
+   }
+   FreeEmptyBuffers();
+@@ -465,6 +499,9 @@ Status FilePrefetchBuffer::HandleOverlappingData(
+         next_buf->DoesBufferContainData()))) {
+     // Allocate new buffer to overlap_buf_.
+     overlap_buf_->ClearBuffer();
++#ifdef CM_DEBUG
++    std::cout << "[Clear Buffer] - HandleOverlappingData" << std::endl;
++#endif
+     overlap_buf_->buffer_.Alignment(alignment);
+     overlap_buf_->buffer_.AllocateNewBuffer(length);
+     overlap_buf_->offset_ = offset;
+@@ -500,6 +537,9 @@ Status FilePrefetchBuffer::HandleOverlappingData(
+                           /*length=*/0, readahead_size, start_offset,
+                           end_offset, read_len, aligned_useful_len);
+       if (read_len > 0) {
++        // std::cout << "[ReadAsync] HandleOverlappingData, read_len " <<
++        // read_len
++        //           << std::endl;
+         s = ReadAsync(new_buf, opts, reader, read_len, start_offset);
+         if (!s.ok()) {
+           DestroyAndClearIOHandle(new_buf);
+diff --git a/file/file_prefetch_buffer.h b/file/file_prefetch_buffer.h
+index dfa838929..d49da618e 100644
+--- a/file/file_prefetch_buffer.h
++++ b/file/file_prefetch_buffer.h
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <deque>
++#include <iostream>
+ #include <sstream>
+ #include <string>
+ 
+@@ -63,6 +64,9 @@ struct BufferInfo {
+     buffer_.Clear();
+     initial_end_offset_ = 0;
+     async_req_len_ = 0;
++#ifdef CM_DEBUG
++    std::cout << "ClearBuffer" << std::endl;
++#endif
+   }
+ 
+   AlignedBuffer buffer_;
+@@ -203,6 +207,9 @@ class FilePrefetchBuffer {
+         usage_(usage),
+         readaheadsize_cb_(cb),
+         num_buffers_(readahead_params.num_buffers) {
++#ifdef CM_DEBUG
++    std::cout << "[Constructor] FilePrefetchBuffer" << std::endl;
++#endif
+     assert((num_file_reads_ >= num_file_reads_for_auto_readahead_ + 1) ||
+            (num_file_reads_ == 0));
+ 
+@@ -220,6 +227,9 @@ class FilePrefetchBuffer {
+   }
+ 
+   ~FilePrefetchBuffer() {
++#ifdef CM_DEBUG
++    std::cout << "[Destructor] FilePrefetchBuffer" << std::endl;
++#endif
+     // Abort any pending async read request before destroying the class object.
+     if (fs_ != nullptr) {
+       std::vector<void*> handles;
+@@ -483,8 +493,7 @@ class FilePrefetchBuffer {
+   bool TryReadFromCacheUntracked(const IOOptions& opts,
+                                  RandomAccessFileReader* reader,
+                                  uint64_t offset, size_t n, Slice* result,
+-                                 Status* s,
+-                                 bool for_compaction = false);
++                                 Status* s, bool for_compaction = false);
+ 
+   void ReadAheadSizeTuning(BufferInfo* buf, bool read_curr_block,
+                            bool refit_tail, uint64_t prev_buf_end_offset,
+@@ -528,6 +537,9 @@ class FilePrefetchBuffer {
+     BufferInfo* buf = free_bufs_.front();
+     free_bufs_.pop_front();
+     bufs_.emplace_back(buf);
++#ifdef CM_DEBUG
++    std::cout << "AllocateBuffer" << std::endl;
++#endif
+   }
+ 
+   void AllocateBufferIfEmpty() {
+diff --git a/include/rocksdb/env.h b/include/rocksdb/env.h
+index 0be90ca2a..099ef1087 100644
+--- a/include/rocksdb/env.h
++++ b/include/rocksdb/env.h
+@@ -247,6 +247,9 @@ class Env : public Customizable {
+     WLTH_MEDIUM,       // Data written has a medium life time
+     WLTH_LONG,         // Data written has a long life time
+     WLTH_EXTREME,      // Data written has an extremely long life time
++    WLTH_EXTREME_2,    // Data written has an extremely long life time
++    WLTH_EXTREME_3,    // Data written has an extremely long life time
++    WLTH_EXTREME_4,    // Data written has an extremely long life time
+   };
+ 
+   // Create an object that writes to a new file with the specified
+diff --git a/run.sh b/run.sh
+new file mode 100755
+index 000000000..712502df0
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,39 @@
++#sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --max_write_buffer_number=1 --file_opening_threads=1 --threads=1 --use_direct_io_for_flush_and_compaction --num=10000000
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --max_write_buffer_number=1 --file_opening_threads=1 --threads=1 --use_direct_io_for_flush_and_compaction --num=10000000 --seed=1
++#sudo gdb --args ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --num=10000000
++#
++#sudo ./plugin/flexfs/util/run.sh
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq,stats --use_direct_io_for_flush_and_compaction --num=100000000
++#sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillseq,stats --use_direct_io_for_flush_and_compaction --num=100000000
++
++#sudo ./plugin/flexfs/util/run.sh
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq,stats --use_direct_io_for_flush_and_compaction --statistics --num=10000000
++#sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillseq,stats --use_direct_io_for_flush_and_compaction --statistics --num=10000000
++
++#sudo ./plugin/flexfs/util/run.sh
++#sudo ./db_bench -db="/home/cm/cns/" --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=10000000
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --statistics --num=10000000
++#
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --statistics --num=1000000
++#sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --statistics --num=1000000
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=readwhilewriting --use_direct_io_for_flush_and_compaction --statistics --num=1000000
++#sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=readwhilewriting --use_direct_io_for_flush_and_compaction --statistics --num=1000000
++
++# TODO: ERROR
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=10000000 
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=10000000  --disable_wal=true
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=10000000 --max_background_flushes=2 --max_background_compactions=1 --disable_wal=true
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=100000000
++sudo ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=100000000
++#sudo gdb --args ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --statistics --num=10000000
++
++# INFO: Pass
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --max_write_buffer_number=1 --file_opening_threads=1 --threads=1
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction
++#sudo ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --max_write_buffer_number=1 --file_opening_threads=1 --threads=1
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --num=10000000
++#
++#sudo gdb --args ./db_bench --fs_uri=zenfs://fdp:nvme0n1 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction
++#sudo gdb --args ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillseq --use_direct_io_for_flush_and_compaction --max_write_buffer_number=1 --file_opening_threads=1 --threads=1
++#sudo gdb --args ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction --max_write_buffer_number=1 --file_opening_threads=1 --threads=1
++#sudo gdb --args ./db_bench --fs_uri=zenfs://dev:nvme2n2 --benchmarks=fillrandom --use_direct_io_for_flush_and_compaction
+diff --git a/table/block_based/block_based_table_reader.cc b/table/block_based/block_based_table_reader.cc
+index adf5b9723..d5aafbe81 100644
+--- a/table/block_based/block_based_table_reader.cc
++++ b/table/block_based/block_based_table_reader.cc
+@@ -12,6 +12,7 @@
+ #include <array>
+ #include <atomic>
+ #include <cstdint>
++#include <iostream>
+ #include <limits>
+ #include <memory>
+ #include <string>
+@@ -165,11 +166,13 @@ Status ReadAndParseBlockFromFile(
+   // If prefetch_buffer is not allocated, it will fallback to synchronous
+   // reading of block contents.
+   if (async_read && prefetch_buffer != nullptr) {
++    // std::cout << "[Async] ReadAndParseBlockFromFile" << std::endl;
+     s = block_fetcher.ReadAsyncBlockContents();
+     if (!s.ok()) {
+       return s;
+     }
+   } else {
++    // std::cout << "[Sync] ReadAndParseBlockFromFile" << std::endl;
+     s = block_fetcher.ReadBlockContents();
+   }
+   if (s.ok()) {
+@@ -887,12 +890,15 @@ Status BlockBasedTable::PrefetchTail(
+ 
+   IOOptions opts;
+   Status s = file->PrepareIOOptions(ro, opts);
+-  // Try file system prefetch
+-  if (s.ok() && !file->use_direct_io() && !force_direct_prefetch) {
+-    if (!file->Prefetch(opts, prefetch_off, prefetch_len).IsNotSupported()) {
+-      prefetch_buffer->reset(new FilePrefetchBuffer(
+-          ReadaheadParams(), false /* enable */, true /* track_min_offset */));
+-      return Status::OK();
++  if (false) {
++    // Try file system prefetch
++    if (s.ok() && !file->use_direct_io() && !force_direct_prefetch) {
++      if (!file->Prefetch(opts, prefetch_off, prefetch_len).IsNotSupported()) {
++        prefetch_buffer->reset(
++            new FilePrefetchBuffer(ReadaheadParams(), false /* enable */,
++                                   true /* track_min_offset */));
++        return Status::OK();
++      }
+     }
+   }
+ 
+@@ -1659,11 +1665,13 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
+         // If prefetch_buffer is not allocated, it will fallback to synchronous
+         // reading of block contents.
+         if (async_read && prefetch_buffer != nullptr) {
++          // std::cout << "[Async] MaybeReadBlockAndLoadToCache" << std::endl;
+           s = block_fetcher.ReadAsyncBlockContents();
+           if (!s.ok()) {
+             return s;
+           }
+         } else {
++          // std::cout << "[Sync] MaybeReadBlockAndLoadToCache" << std::endl;
+           s = block_fetcher.ReadBlockContents();
+         }
+ 
+diff --git a/table/block_fetcher.cc b/table/block_fetcher.cc
+index 31b6d9388..a5afe7e56 100644
+--- a/table/block_fetcher.cc
++++ b/table/block_fetcher.cc
+@@ -11,6 +11,7 @@
+ 
+ #include <cassert>
+ #include <cinttypes>
++#include <iostream>
+ #include <string>
+ 
+ #include "logging/logging.h"
+@@ -75,6 +76,9 @@ inline bool BlockFetcher::TryGetFromPrefetchBuffer() {
+   if (prefetch_buffer_ != nullptr) {
+     IOOptions opts;
+     IOStatus io_s = file_->PrepareIOOptions(read_options_, opts);
++    // std::cout << "[GET] TryGetFromPrefetchBuffer, (offset, size) "
++    //           << handle_.offset() << ", " << block_size_with_trailer_
++    //           << std::endl;
+     if (io_s.ok()) {
+       bool read_from_prefetch_buffer = prefetch_buffer_->TryReadFromCache(
+           opts, file_, handle_.offset(), block_size_with_trailer_, &slice_,
+diff --git a/waf_logging.patch b/waf_logging.patch
+new file mode 100644
+index 000000000..2b7c9fa91
+--- /dev/null
++++ b/waf_logging.patch
+@@ -0,0 +1,375 @@
++diff --git a/db/db_impl/db_impl.cc b/db/db_impl/db_impl.cc
++index 4e28454d6..ccb127f0b 100644
++--- a/db/db_impl/db_impl.cc
+++++ b/db/db_impl/db_impl.cc
++@@ -76,6 +76,15 @@
++ #ifdef ROCKSDB_JEMALLOC
++ #include "port/jemalloc_helper.h"
++ #endif
+++#include <sys/types.h>
+++#include <sys/wait.h>
+++#include <unistd.h>
+++
+++#include <array>
+++#include <iostream>
+++#include <sstream>
+++#include <string>
+++
++ #include "port/port.h"
++ #include "rocksdb/cache.h"
++ #include "rocksdb/compaction_filter.h"
++@@ -112,7 +121,6 @@
++ #include "util/string_util.h"
++ #include "util/udt_util.h"
++ #include "utilities/trace/replayer_impl.h"
++-
++ namespace ROCKSDB_NAMESPACE {
++ 
++ const std::string kDefaultColumnFamilyName("default");
++@@ -1180,6 +1188,43 @@ void DBImpl::DumpStats() {
++   ROCKS_LOG_INFO(immutable_db_options_.info_log,
++                  "------- DUMPING STATS -------");
++   ROCKS_LOG_INFO(immutable_db_options_.info_log, "%s", stats.c_str());
+++  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+++                 "------- NVME WRITTEN DATA -------");
+++  std::ostringstream oss;
+++  std::vector<uint64_t> smart_log = GetSmartAddLog("/dev/nvme0");
+++  // std::vector<uint64_t> smart_log = GetSmartLog("/dev/nvme2n2");
+++  std::string waf_d0 = GetWaf_D0("/dev/nvme0");
+++  oss << std::endl;
+++  if (smart_log.size() == 1) {
+++    oss << "[DEBUG] Data Units Written: " << smart_log[0] * 512 * 1000
+++        << " Bytes " << std::endl;
+++    oss << "[DEBUG] Data Units Written: "
+++        << smart_log[0] * 512 * 1000 / 1024 / 1024 / 1024 << " GiB"
+++        << std::endl;
+++
+++  } else if (smart_log.size() == 3) {
+++    oss << "[DEBUG] Written Data Units " << smart_log[0] * 512 * 1000
+++        << " Physical " << smart_log[1] << " Bytes" << std::endl;
+++    oss << "[DEBUG] Written Data Units "
+++        << smart_log[0] * 512 * 1000 / 1024 / 1024 / 1024 << " Physical "
+++        << smart_log[1] / 1024 / 1024 / 1024 << " (GiB)" << std::endl;
+++    oss << "[DEBUG] Free block: " << smart_log[2] << " %" << std::endl;
+++  } else {
+++    oss << "[DEBUG] Can't get smart log" << std::endl;
+++  }
+++  oss << "[DEBUG] WAF from 0xD0: " << waf_d0 << std::endl;
+++  oss << "[DEBUG] Cumulative ingest: "
+++      << ExtractValueFromLine(stats, "Cumulative writes", "ingest:") << " GB"
+++      << std::endl;
+++  oss << "[DEBUG] Cumulative WAL: "
+++      << ExtractValueFromLine(stats, "Cumulative WAL", "written:") << " GB"
+++      << std::endl;
+++  oss << "[DEBUG] Cumulative Compaction: "
+++      << ExtractValueFromLine(stats, "Cumulative compaction", "compaction:")
+++      << " GB" << std::endl;
+++  ROCKS_LOG_INFO(immutable_db_options_.info_log, "%s", oss.str().c_str());
+++  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+++                 "------- NVME WRITTEN DATA -------");
++   if (immutable_db_options_.dump_malloc_stats) {
++     stats.clear();
++     DumpMallocStats(&stats);
++@@ -6661,4 +6706,273 @@ void DBImpl::InstallSeqnoToTimeMappingInSV(
++   bg_cv_.SignalAll();
++ }
++ 
+++std::vector<uint64_t> DBImpl::GetSmartLog(const std::string& device) {
+++  // Command and arguments to pass to execvp
+++  char* args[] = {(char*)"nvme", (char*)"smart-log", (char*)device.c_str(),
+++                  nullptr};
+++  std::vector<uint64_t> values;
+++
+++  // Create a pipe for communication between processes
+++  int pipefd[2];
+++  if (pipe(pipefd) == -1) {
+++    std::cerr << "Failed to create pipe" << std::endl;
+++    return values;
+++  }
+++
+++  // Fork a new process
+++  pid_t pid = fork();
+++  if (pid == -1) {
+++    std::cerr << "Failed to fork process" << std::endl;
+++    return values;
+++  } else if (pid == 0) {  // Child process
+++    // Close the read end of the pipe in the child process
+++    close(pipefd[0]);
+++    // Redirect stdout to the write end of the pipe
+++    dup2(pipefd[1], STDOUT_FILENO);
+++    // Close the write end of the pipe as it is now duplicated
+++    close(pipefd[1]);
+++
+++    // Execute the nvme smart-log command
+++    execvp(args[0], args);
+++
+++    // If execvp fails, exit the child process
+++    std::cerr << "execvp failed" << std::endl;
+++    _exit(1);
+++  } else {  // Parent process
+++    // Close the write end of the pipe in the parent process
+++    close(pipefd[1]);
+++
+++    // Read from the read end of the pipe
+++    std::array<char, 128> buffer;
+++    std::string result;  // Ensure result is defined as std::string
+++    ssize_t bytesRead;
+++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
+++      result.append(buffer.data(), bytesRead);  // Append read data to result
+++    }
+++
+++    // Close the read end of the pipe
+++    close(pipefd[0]);
+++
+++    // Wait for the child process to finish
+++    waitpid(pid, nullptr, 0);
+++
+++    std::string intStr;
+++    uint64_t value;
+++
+++    intStr = ExtractValueFromLine(result, "Data Units Written", ":");
+++    value = std::stoll(intStr);  // written data(bytes)
+++    values.push_back(value);
+++  }
+++
+++  // Return 0 if "Data Units Written" not found
+++  return values;
+++}
+++
+++std::vector<uint64_t> DBImpl::GetSmartAddLog(const std::string& device) {
+++  // Command and arguments to pass to execvp
+++  char* args[] = {(char*)"nvme", (char*)"ocp", (char*)"smart-add-log",
+++                  (char*)device.c_str(), nullptr};
+++  std::vector<uint64_t> values;
+++
+++  std::vector<uint64_t> smart_values = GetSmartLog(device.c_str());
+++  if (smart_values.size() == 1) {
+++    values.push_back(smart_values[0]);
+++  } else {
+++    values.push_back(0);
+++  }
+++
+++  // Create a pipe for communication between processes
+++  int pipefd[2];
+++  if (pipe(pipefd) == -1) {
+++    std::cerr << "Failed to create pipe" << std::endl;
+++    return values;
+++  }
+++
+++  // Fork a new process
+++  pid_t pid = fork();
+++  if (pid == -1) {
+++    std::cerr << "Failed to fork process" << std::endl;
+++    return values;
+++  } else if (pid == 0) {  // Child process
+++    // Close the read end of the pipe in the child process
+++    close(pipefd[0]);
+++    // Redirect stdout to the write end of the pipe
+++    dup2(pipefd[1], STDOUT_FILENO);
+++    // Close the write end of the pipe as it is now duplicated
+++    close(pipefd[1]);
+++
+++    // Execute the nvme smart-log command
+++    execvp(args[0], args);
+++
+++    // If execvp fails, exit the child process
+++    std::cerr << "execvp failed" << std::endl;
+++    _exit(1);
+++  } else {  // Parent process
+++    // Close the write end of the pipe in the parent process
+++    close(pipefd[1]);
+++
+++    // Read from the read end of the pipe
+++    std::array<char, 128> buffer;
+++    std::string result;  // Ensure result is defined as std::string
+++    ssize_t bytesRead;
+++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
+++      result.append(buffer.data(), bytesRead);  // Append read data to result
+++    }
+++
+++    // Close the read end of the pipe
+++    close(pipefd[0]);
+++
+++    // Wait for the child process to finish
+++    waitpid(pid, nullptr, 0);
+++
+++    std::string intStr;
+++    uint64_t value;
+++
+++    intStr = ExtractValueFromLine(result, "written", "0");
+++    value = std::stoll(intStr);  // written data(bytes)
+++    values.push_back(value);
+++
+++    intStr = ExtractValueFromLine(result, "free", "blocks");
+++    value = std::stoll(intStr);  // % of free blocks
+++    values.push_back(value);
+++    /*
+++    // Parse the "Data Units Written" value from the command output
+++    std::istringstream iss(result);
+++    std::string line;
+++
+++    while (std::getline(iss, line)) {
+++      if (line.find("Data Units Written") != std::string::npos) {
+++        std::istringstream lineStream(line);
+++        std::string label;
+++        uint64_t value;
+++        while (lineStream >> label) {
+++          std::cout << "LABEL : " << label << std::endl;
+++          if (label == ":") {
+++            lineStream >> value;
+++            return value * 512 * 1000;
+++          }
+++        }
+++      }
+++    }
+++    */
+++  }
+++
+++  // Return 0 if "Data Units Written" not found
+++  return values;
+++}
+++
+++std::string DBImpl::GetWaf_D0(const std::string& device) {
+++  // Command and arguments to pass to execvp
+++  char* args[] = {
+++      (char*)"nvme", (char*)"get-log", (char*)"-l",           (char*)"8",
+++      (char*)"-i",   (char*)"0xD0",    (char*)device.c_str(), nullptr};
+++
+++  // Create a pipe for communication between processes
+++  int pipefd[2];
+++  if (pipe(pipefd) == -1) {
+++    std::cerr << "Failed to create pipe" << std::endl;
+++    return "";
+++  }
+++
+++  // Fork a new process
+++  pid_t pid = fork();
+++  if (pid == -1) {
+++    std::cerr << "Failed to fork process" << std::endl;
+++    return "";
+++  } else if (pid == 0) {  // Child process
+++    // Close the read end of the pipe in the child process
+++    close(pipefd[0]);
+++    // Redirect stdout to the write end of the pipe
+++    dup2(pipefd[1], STDOUT_FILENO);
+++    // Close the write end of the pipe as it is now duplicated
+++    close(pipefd[1]);
+++
+++    // Execute the nvme smart-log command
+++    execvp(args[0], args);
+++
+++    // If execvp fails, exit the child process
+++    std::cerr << "execvp failed" << std::endl;
+++    _exit(1);
+++  } else {  // Parent process
+++    // Close the write end of the pipe in the parent process
+++    close(pipefd[1]);
+++
+++    // Read from the read end of the pipe
+++    std::array<char, 128> buffer;
+++    std::string result;  // Ensure result is defined as std::string
+++    ssize_t bytesRead;
+++    while ((bytesRead = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
+++      result.append(buffer.data(), bytesRead);  // Append read data to result
+++    }
+++
+++    // Close the read end of the pipe
+++    close(pipefd[0]);
+++
+++    // Wait for the child process to finish
+++    waitpid(pid, nullptr, 0);
+++
+++    // std::cout << "[[[DEBUG]]]" << result << std::endl;
+++    std::string hexStr;
+++
+++    hexStr = ExtractValueFromLine(result, "0000:", "0000:");
+++    return hexStr;
+++    // uint64_t value;
+++    //  std::cout << "[[[HexStr]]]" << hexStr << std::endl;
+++    //  value = std::stoull(hexStr, nullptr, 16);
+++    //  std::cout << "[[[Value]]]" << value << std::endl;
+++    //  return value;
+++
+++    /*
+++    // Parse the "Data Units Written" value from the command output
+++    std::istringstream iss(result);
+++    std::string line;
+++
+++    while (std::getline(iss, line)) {
+++      if (line.find("Data Units Written") != std::string::npos) {
+++        std::istringstream lineStream(line);
+++        std::string label;
+++        uint64_t value;
+++        while (lineStream >> label) {
+++          std::cout << "LABEL : " << label << std::endl;
+++          if (label == ":") {
+++            lineStream >> value;
+++            return value * 512 * 1000;
+++          }
+++        }
+++      }
+++    }
+++    */
+++  }
+++
+++  // Return 0 if "Data Units Written" not found
+++  return "";
+++}
+++
+++std::string DBImpl::ExtractValueFromLine(const std::string& input,
+++                                         const std::string& lineStart,
+++                                         const std::string& targetWord) {
+++  std::istringstream iss(input);
+++  std::string line;
+++
+++  // 입력 문자열에서 한 줄씩 읽기
+++  while (std::getline(iss, line)) {
+++    // if (line.find(lineStart) == 0) {  // 줄의 시작을 확인하려면 == 0을 사용
+++    if (line.find(lineStart) != std::string::npos) {  // 줄의 임의 위치에서 찾기
+++      std::istringstream lineStream(line);
+++      std::string word;
+++
+++      // 각 단어를 읽어 지정된 단어를 찾기
+++      while (lineStream >> word) {
+++        if (word == targetWord) {
+++          std::string value;
+++          if (lineStream >> value) {
+++            return value;  // 찾은 값을 반환
+++          }
+++        }
+++      }
+++    }
+++  }
+++  return "0";  // 지정된 줄이나 값을 찾지 못한 경우 빈 문자열 반환
+++}
+++
++ }  // namespace ROCKSDB_NAMESPACE
++diff --git a/db/db_impl/db_impl.h b/db/db_impl/db_impl.h
++index 8192269ed..2ee260428 100644
++--- a/db/db_impl/db_impl.h
+++++ b/db/db_impl/db_impl.h
++@@ -1830,8 +1830,8 @@ class DBImpl : public DB {
++     const InternalKey* begin = nullptr;  // nullptr means beginning of key range
++     const InternalKey* end = nullptr;    // nullptr means end of key range
++     InternalKey* manual_end = nullptr;   // how far we are compacting
++-    InternalKey tmp_storage;      // Used to keep track of compaction progress
++-    InternalKey tmp_storage1;     // Used to keep track of compaction progress
+++    InternalKey tmp_storage;   // Used to keep track of compaction progress
+++    InternalKey tmp_storage1;  // Used to keep track of compaction progress
++ 
++     // When the user provides a canceled pointer in CompactRangeOptions, the
++     // above varaibe is the reference of the user-provided
++@@ -2229,6 +2229,13 @@ class DBImpl : public DB {
++ 
++   size_t EstimateInMemoryStatsHistorySize() const;
++ 
+++  std::vector<uint64_t> GetSmartLog(const std::string& device);
+++  std::vector<uint64_t> GetSmartAddLog(const std::string& device);
+++  std::string GetWaf_D0(const std::string& device);
+++  std::string ExtractValueFromLine(const std::string& input,
+++                                   const std::string& lineStart,
+++                                   const std::string& targetWord);
+++
++   // Return the minimum empty level that could hold the total data in the
++   // input level. Return the input level, if such level could not be found.
++   int FindMinimumEmptyLevelFitting(ColumnFamilyData* cfd,
+-- 
+2.34.1
+
